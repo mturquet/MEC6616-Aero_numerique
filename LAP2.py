@@ -151,6 +151,8 @@ def analytique(x,prm,n):
     phi = np.zeros(n)
     for i in range(n):
         phi[i]=(np.exp(rho*u*x[i]/Gamma)-1)/(np.exp(rho*u*L/Gamma)-1)*(phi_B-phi_A)+phi_A
+        
+    
     
     return phi
 
@@ -242,12 +244,13 @@ def ConvDiff1DUpwind(x,prm,n):
 #Case 1
 # Conditions initiales
 dx1=prm1.L/prm1.N
+dx100 = prm1.L/100
 
 # Graphiques
 x1 = np.linspace(prm1.x_0 + dx1 / 2, prm1.x_f - dx1 / 2, prm1.N)
 phi1 = ConvDiff1DCentré(x1, prm1, prm1.N)
-x_anal = np.linspace(prm1.x_0 + dx1 / 2, prm1.x_f - dx1 / 2, prm1.N)
-T_anal = analytique(x_anal, prm1, prm1.N)
+x_anal = np.linspace(prm1.x_0 + dx100 / 2, prm1.x_f - dx100 / 2, 100)
+T_anal = analytique(x_anal, prm1, 100)
 plt.figure(1)
 plt.plot(x1, phi1, '.', label='Solution numérique Centré')
 plt.plot(x_anal, T_anal, label='Solution analytique' )
@@ -259,7 +262,7 @@ plt.legend()
 
 
 # Erreur
-n_values = np.arange(5, 1001, 5)  
+n_values = np.arange(5, 1001, 100)  
 h_values = prm1.L / n_values
 Erreur_L1 = []  
 Erreur_L2 = []
@@ -300,12 +303,12 @@ print("La convergeance de l'erreur pour le problème 5.1 (Case 1) est de :"+ A)
 
 #Case 2
 dx2=prm2.L/prm2.N
-
+dx200 = prm2.L/100
 # Graphiques
 x2 = np.linspace(prm1.x_0 + dx2 / 2, prm1.x_f - dx2 / 2, prm2.N)
 phi2 = ConvDiff1DCentré(x2, prm2, prm2.N)
-x_anal = np.linspace(prm1.x_0 + dx2 / 2, prm1.x_f - dx2 / 2, prm3.N)
-T_anal2 = analytique(x_anal, prm2, prm3.N)
+x_anal = np.linspace(prm1.x_0 + dx200 / 2, prm1.x_f - dx200 / 2, 100)
+T_anal2 = analytique(x_anal, prm2, 100)
 plt.figure(1)
 plt.plot(x2, phi2, marker = '.', label='Solution numérique Centré')
 plt.plot(x_anal, T_anal2, label='Solution analytique' )
@@ -319,7 +322,7 @@ plt.legend()
 # Erreur
 
 
-n_values = np.arange(5, 1001, 5)  
+n_values = np.arange(5, 1001, 100)  
 h_values = prm1.L / n_values
 Erreur_L1 = []  
 Erreur_L2 = []
@@ -364,8 +367,8 @@ dx3=prm3.L/prm3.N
 # Graphiques
 x3 = np.linspace(prm3.x_0 + dx3 / 2, prm3.x_f - dx3 / 2, prm3.N)
 phi3 = ConvDiff1DCentré(x3, prm3, prm3.N)
-x_anal3 = np.linspace(prm3.x_0 + dx3 / 2, prm3.x_f - dx3 / 2, prm3.N)
-T_anal3 = analytique(x_anal3, prm3, prm3.N)
+x_anal3 = np.linspace(prm3.x_0 + dx200 / 2, prm3.x_f - dx200 / 2, 100)
+T_anal3 = analytique(x_anal3, prm3, 100)
 plt.figure(1)
 plt.plot(x3, phi3, marker = '.', label='Solution numérique Centré')
 plt.plot(x_anal3, T_anal3, label='Solution analytique' )
@@ -376,7 +379,7 @@ plt.xlim(0, prm1.L)
 plt.legend()
 
 # Erreur
-n_values = np.arange(5, 1001, 5)  
+n_values = np.arange(5, 1001, 100)  
 h_values = prm3.L / n_values
 Erreur_L1 = []  
 Erreur_L2 = []
@@ -420,12 +423,13 @@ dx2=prm2.L/prm2.N
 #Case 1
 # Conditions initiales
 dx1=prm1.L/prm1.N
+dx100 =prm1.L/100
 
 # Graphiques
 x1 = np.linspace(prm1.x_0 + dx1 / 2, prm1.x_f - dx1 / 2, prm1.N)
 phi1 = ConvDiff1DUpwind(x1, prm1, prm1.N)
-x_anal = np.linspace(prm1.x_0 + dx1 / 2, prm1.x_f - dx1 / 2, prm1.N)
-T_anal = analytique(x_anal, prm1, prm1.N)
+x_anal = np.linspace(prm1.x_0 + dx100 / 2, prm1.x_f - dx100 / 2, 100)
+T_anal = analytique(x_anal, prm1, 100)
 plt.figure(1)
 plt.plot(x1, phi1, '.', label='Solution numérique Upwind')
 plt.plot(x_anal, T_anal, label='Solution analytique n points' )
@@ -437,7 +441,7 @@ plt.legend()
 
 
 # Erreur
-n_values = np.arange(5, 1001, 5)  
+n_values = np.arange(5, 1001, 100)  
 h_values = prm1.L / n_values
 Erreur_L1 = []  
 Erreur_L2 = []
@@ -477,11 +481,12 @@ print("La convergeance de l'erreur pour le problème 5.2 (Case 1) est de :"+ A)
 
 
 #Case 2 
+dx200 = prm2.L/100
 
 x2 = np.linspace(prm2.x_0 + dx2 / 2, prm2.x_f - dx2 / 2, prm2.N)
 T2 = ConvDiff1DUpwind(x2, prm2, prm2.N)
-x_anal2 = np.linspace(prm2.x_0 + dx2 / 2, prm2.x_f - dx2 / 2, prm3.N)
-T_anal2 = analytique(x_anal2, prm2, prm3.N)
+x_anal2 = np.linspace(prm2.x_0 + dx200 / 2, prm2.x_f - dx200 / 2, 100)
+T_anal2 = analytique(x_anal2, prm2, 100)
 plt.figure(3)
 plt.plot(x2, T2, '.', label='Solution numérique Upwind')
 plt.plot(x_anal2, T_anal2, label='Solution analytique' )
@@ -491,7 +496,7 @@ plt.ylabel('Phi')
 plt.xlim(0, prm2.L)
 plt.legend()
 
-n_values = np.arange(5, 1001, 5)  
+n_values = np.arange(5, 1001, 100)  
 h_values = prm2.L / n_values
 Erreur_L1 = []  
 Erreur_L2 = []
