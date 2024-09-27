@@ -1,0 +1,968 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Sep 25 15:33:12 2024
+
+@author: mathisturquet
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Sep 24 08:57:36 2024
+
+@author: mathisturquet
+"""
+
+#%% Import des librairies 
+
+import sympy as sp
+import numpy as np
+import pyvista as pv
+import pyvistaqt as pvQt
+from meshGenerator import MeshGenerator
+from meshConnectivity import MeshConnectivity
+from meshPlotter import MeshPlotter
+from mesh import Mesh
+import matplotlib.pyplot as plt 
+
+## test récupération nombre de faces  
+mesher = MeshGenerator()
+plotter = MeshPlotter()
+
+mesh_parameters = {'mesh_type': 'QUAD',
+                   'lc': 0.05
+                   }
+mesh_obj1 = mesher.rectangle([0.0, 1.0, 0.0, 1.0], mesh_parameters)
+conec = MeshConnectivity(mesh_obj1)
+conec.compute_connectivity()
+#plotter.plot_mesh(mesh_obj)
+
+def normal(xa, ya, xb, yb):
+    """
+    Fonction pour renvoyer a et b du vecteur normal unitaire à une arête 
+
+    Parameters
+    ----------
+    xa, ya : Coordonnées du point A
+    xb, yb : Coordonnées du point B
+
+    Returns
+    -------
+    a, b : Composantes du vecteur normal unitaire
+    """
+    dx = xb - xa
+    dy = yb - ya
+    
+    # Calcul de la longueur de l'arête (norme du vecteur)
+    Delta_A = np.sqrt(dx**2 + dy**2)
+    
+   
+    a = dy / Delta_A
+    b = - dx / Delta_A
+    
+    return a, b
+
+def centre_element_2D(mesh_obj,i_element):
+    """
+    Fonction pour renvoyer  xmoy et ymoy centre des faces et lieu des éléments géométriques en 2D 
+
+    Parameters
+    ----------
+    Maillage et numéro de l'élément
+
+    Returns
+    -------
+    xmoy et y moy 
+    """
+    # Récupération des données des sommets 
+    start = mesh_obj.get_element_to_nodes_start(i_element)
+    fin = mesh_obj.get_element_to_nodes_start(i_element+1)
+    noeuds_i_elements = mesh_obj.element_to_nodes[start:fin] # Création des listes pour les noeuds autour d'un élément
+    # Calcul du centre géométrique du triangle
+    xmoy = 0 # Initilaisation des coordonnées virtuelles de l'élément 
+    ymoy = 0
+    for i in range(len(noeuds_i_elements)):
+        x,y = mesh_obj.get_node_to_xycoord(noeuds_i_elements[i])
+        xmoy += x
+        ymoy += y 
+    xmoy = xmoy/len(noeuds_i_elements)
+    ymoy = ymoy/len(noeuds_i_elements)
+    return xmoy,ymoy
+
+
+def diffusion2D(mesh_obj,bcdata,gradient,gamma,phi,matrice):
+    
+    bc_types = [item[0] for item in bcdata]  # Extrait la première valeur de chaque tuple
+    bc_numbers = [item[1] for item in bcdata]
+    
+    # Création des coordonnées des éléments 
+    
+    coordonnees_elements_x = []
+    coordonnees_elements_y = []
+    
+    #Création des données
+    number_of_faces = mesh_obj.number_of_faces
+    number_of_elements = mesh_obj.number_of_elements
+    
+    A = np.zeros((number_of_elements,number_of_elements))
+    B = np.zeros((number_of_elements,1))
+    
+    for i in range(number_of_elements):
+        
+        # Récupération des différents noeuds autour d'un éléments
+        
+        # start = mesh_obj.get_element_to_nodes_start(i)
+        # fin = mesh_obj.get_element_to_nodes_start(i+1)
+        # noeuds_i_elements = mesh_obj.element_to_nodes[start:fin] 
+        
+        
+        # Création du centre gémoétrique des différentes formes 
+        
+        x_e, y_e = centre_element_2D(mesh_obj, i)
+        
+        # Récupération dans deux listes distinctes 
+        
+        coordonnees_elements_x.append(x_e)
+        coordonnees_elements_y.append(y_e)  
+        
+    for i in range(number_of_faces):
+        neighbours_elements = mesh_obj.get_face_to_elements(i)
+        nodes = mesh_obj.get_face_to_nodes(i)
+        Tg,Td = neighbours_elements
+        
+        
+        if neighbours_elements[1] != -1 :
+            
+            neighbours_elements = mesh_obj.get_face_to_elements(i)
+            nodes = mesh_obj.get_face_to_nodes(i)
+            Tg,Td = neighbours_elements
+            grad_tg = Grad[Tg]
+            grad_td = Grad[Td]
+            
+            # CRéation des points de la l'arrête
+            
+            xa,ya = mesh_obj.get_node_to_xycoord(nodes[0])
+            xb,yb = mesh_obj.get_node_to_xycoord(nodes[1])
+            
+            delta_x = xb - xa
+            delta_y = yb - ya
+            
+            # Création des points d'arrêtes 
+            element_A = neighbours_elements[0]
+            element_p = neighbours_elements[1]
+            
+            xA = coordonnees_elements_x[element_A]
+            xp = coordonnees_elements_x[element_p]
+            yA = coordonnees_elements_y[element_A]
+            yp = coordonnees_elements_y[element_p]
+            
+            # Création des paramètres 
+            delta_ksi = ((xA-xp)**2 + (yA-yp)**2)**(1/2)
+            
+            delta_Ai = ((xb-xa)**2+(yb-ya)**2)**(1/2)
+            
+            delta_eta = delta_Ai
+            
+            nix,niy = normal(xa,ya,xb,yb)
+            
+            e_ksi = [ (xA-xp) /delta_ksi , (yA-yp)/delta_ksi]
+            
+            e_eta = [ (xb-xa) /delta_Ai  , (ya-yb)/delta_Ai]
+            
+            grad_b = gradient[Tg]
+            grad_a = gradient[Td]
+            # Construction des calculs 
+            
+            PNKSI = (delta_y * (xA-xp) / (delta_Ai * delta_ksi)) - (delta_x*(yA-yp) / (delta_Ai * delta_ksi))
+            
+            PKSIETA = ((xA-xp)*(xa-xb)/(delta_ksi * delta_eta)) + ((yA-yp)*(ya-yb)/(delta_ksi*delta_eta))
+            
+            Di = (1/PNKSI)*gamma*delta_Ai/delta_ksi
+            
+            if matrice == 0 :
+                # Uniquement si cela est connu 
+            
+                Sd_cross_i = -gamma*(PKSIETA/PNKSI)* (((grad_a[0]+grad_b[0])/2)*(xb-xa) /delta_Ai)*(((grad_a[1]+grad_b[1])/2)*(yb-ya) /delta_Ai)* delta_Ai
+            
+            if matrice == 1 :
+                
+                Sd_cross_i = -gamma*(PKSIETA/PNKSI)* (((grad_a[0]+grad_b[0])/2)*(xb-xa) /delta_Ai)*(((grad_a[1]+grad_b[1])/2)*(yb-ya) /delta_Ai)* delta_Ai
+            
+            # Implémentation des différents paramètres sur A et B 
+            
+            A[Tg][Tg] = A[Tg][Tg] + Di
+            
+            A[Td][Td] = A[Td][Td] + Di
+                        
+            A[Tg][Td] = - Di + A[Tg][Td]
+            
+            A[Td][Tg] =  -Di + A[Td][Tg] 
+            
+            B[Tg] = B[Tg] + Sd_cross_i
+            
+            B[Td] = B[Td] - Sd_cross_i
+    
+            
+        if neighbours_elements[1] == -1 :
+            tag = mesh_obj.get_boundary_face_to_tag(i)
+            bc_type = bc_types[tag]
+            bc_number = bc_numbers [tag]
+            
+            if bc_type == 'NEUMANN':
+                
+                neighbours_elements = mesh_obj.get_face_to_elements(i)
+                nodes = mesh_obj.get_face_to_nodes(i)
+                Tg,Td = neighbours_elements
+                
+                # CRéation des points de la l'arrête
+                
+                xa,ya = mesh_obj.get_node_to_xycoord(nodes[0])
+                xb,yb = mesh_obj.get_node_to_xycoord(nodes[1])
+                
+                delta_x = xb - xa
+                delta_y = yb - ya
+                
+                # Création des points d'arrêtes 
+                element_A = neighbours_elements[0]
+                element_p = neighbours_elements[1]
+                
+                xA = coordonnees_elements_x[element_A]
+                xp = coordonnees_elements_x[element_p]
+                yA = coordonnees_elements_y[element_A]
+                yp = coordonnees_elements_y[element_p]
+                
+                # Création des paramètres 
+                delta_ksi = ((xA-xp)**2 + (yA-yp)**2)**(1/2)
+                
+                
+                delta_Ai = ((xb-xa)**2+(yb-ya)**2)**(1/2)
+                
+                delta_eta = delta_Ai
+                
+                nix,niy = normal(xa,ya,xb,yb)
+                
+                e_ksi = [ (xA-xp) /delta_ksi , (yA-yp)/delta_ksi]
+                
+                e_eta = [ (xb-xa) /delta_Ai  , (ya-yb)/delta_Ai]
+                
+                
+                grad_b = gradient[Tg]
+                grad_a = gradient[Td]
+                
+                
+                # Construction des calculs 
+                
+                PNKSI = (delta_y * (xA-xp) / (delta_Ai * delta_ksi)) - (delta_x*(yA-yp) / (delta_Ai * delta_ksi))
+                
+                PKSIETA = ((xA-xp)*(xa-xb)/(delta_ksi * delta_eta)) + ((yA-yp)*(ya-yb)/(delta_ksi*delta_eta))
+                
+                Di = (1/PNKSI)*gamma*delta_Ai/delta_ksi
+                
+                if matrice == 0 :
+                    # Uniquement si cela  n'est pas connu 
+                
+                    Sd_cross_i = -gamma*(PKSIETA/PNKSI)*(((grad_a[0]+grad_b[0])/2)*(xb-xa) /delta_Ai)*(((grad_a[1]+grad_b[1])/2)*(yb-ya) /delta_Ai)* delta_Ai
+                
+                if matrice == 1 :
+                    
+                    Sd_cross_i = -gamma*(PKSIETA/PNKSI)*((phi(xb,yb)-phi(xa,ya))/delta_eta)* delta_Ai
+                
+                valeur = bc_number((xb+xa)/2,(ya+yb)/2)
+            
+                B[Tg] = B[Tg] + gamma*valeur*delta_Ai
+                
+            if bc_type == 'DIRICHLET':
+                # Création des paramètres
+                
+                element_A = neighbours_elements[0]# Inutile
+                element_p = neighbours_elements[1]# Inutile
+                xa,ya = mesh_obj.get_node_to_xycoord(nodes[0]) # Inutile
+                xb,yb = mesh_obj.get_node_to_xycoord(nodes[1]) # Inutile
+                
+                xA = coordonnees_elements_x[element_A]
+                yA = coordonnees_elements_y[element_A]
+               
+                xp = (xa+xb)/2
+                yp = (ya+yb)/2
+                
+                delta_x = xb - xa
+                delta_y = yb - ya
+                grad_b = gradient[Tg]
+                grad_a = gradient[Td]
+                
+                valeur = bc_number(xp,yp)
+                
+                
+                delta_ksi = ((xA-xp)**2 + (yA-yp)**2)**(1/2) #OK
+                
+                delta_Ai = ((xb-xa)**2+(yb-ya)**2)**(1/2) #OK
+                
+                delta_eta = delta_Ai #OK
+                
+                nix,niy = normal(xa,ya,xb,yb) #OK
+                
+                e_ksi = [ (xA-xp) /delta_ksi , (yA-yp)/delta_ksi]
+                
+                e_eta = [ (xb-xa) /delta_Ai  , (ya-yb)/delta_Ai]
+                
+                # Construction des calculs
+                phiD = valeur
+                
+                PNKSI = (delta_y * (xA-xp) / (delta_Ai * delta_ksi)) - (delta_x*(yA-yp) / (delta_Ai * delta_ksi))
+                
+                PKSIETA = ((xA-xp)*(xa-xb)/(delta_ksi * delta_eta)) + ((yA-yp)*(ya-yb)/(delta_ksi*delta_eta))
+                
+                Di = (1/PNKSI)*gamma*delta_Ai/delta_ksi
+                
+                Sd_cross_i = -gamma*(PKSIETA/PNKSI)*delta_Ai*(((grad_a[0]+grad_b[0])/2)*(xb-xa) /delta_Ai)*(((grad_a[1]+grad_b[1])/2)*(yb-ya) /delta_Ai)
+                
+                A[Tg][Tg] = A[Tg][Tg] + Di
+                
+                B[Tg] = B[Tg]+ Sd_cross_i + Di*phiD
+                
+            
+    solution = np.linalg.solve(A,B)
+    
+    return solution
+
+def phi(x,y):
+    return x 
+
+def least_square(mesh_obj,bcdata,phi):
+    
+    bc_types = [item[0] for item in bcdata]  # Extrait la première valeur de chaque tuple
+    bc_numbers = [item[1] for item in bcdata]
+    
+    #Création des données
+    number_of_faces = mesh_obj.number_of_faces
+    number_of_elements = mesh_obj.number_of_elements
+    
+    # Création des coordonnées des éléments 
+    
+    coordonnees_elements_x = []
+    coordonnees_elements_y = []
+    
+    voisins = []
+    
+    f = mesh_obj.number_of_elements
+    a =mesh_obj.number_of_faces
+    s = mesh_obj.number_of_nodes
+    bcdata =mesh_obj.get_boundary_faces_to_tag()
+    
+    # Création de la matrice de calcul ATA 
+    
+    ATA = np.zeros((f,2,2))
+    
+    # Création de la matrice B 
+    
+    B = np.zeros((f,2))
+    
+    for i in range(number_of_elements):
+        
+        # Récupération des différents noeuds autour d'un éléments
+        
+        start = mesh_obj.get_element_to_nodes_start(i)
+        fin = mesh_obj.get_element_to_nodes_start(i+1)
+        noeuds_i_elements = mesh_obj.element_to_nodes[start:fin] 
+        
+        
+        # Création du centre gémoétrique des différentes formes 
+        
+        x_e, y_e = centre_element_2D(mesh_obj, i)
+        
+        # Récupération dans deux listes distinctes 
+        
+        coordonnees_elements_x.append(x_e)
+        coordonnees_elements_y.append(y_e)  
+        
+    # Parcours de l'ensemble des arrêtes pour la création des différentes matrices 
+    
+    for i in range(number_of_faces):
+        neighbours_elements = mesh_obj.get_face_to_elements(i)
+        # Récupération des éléments voisins
+        voisins.append(neighbours_elements)
+        
+        Tg,Td = neighbours_elements
+        
+        if neighbours_elements[1] == -1 : # pour les faces frontières 
+            
+            tag = mesh_obj.get_boundary_face_to_tag(i)
+            bc_type = bc_types[tag]
+            bc_number = bc_numbers [tag]
+            
+            
+            
+            if ( bc_type == 'DIRICHLET' ) :
+                # DIRICHLET
+                # Création du centre de l'arrête 
+                noeuds_faces = mesh_obj.get_face_to_nodes(i)
+                
+                # Milieu
+                
+                xa = mesh_obj.get_node_to_xcoord(noeuds_faces[0])
+                ya = mesh_obj.get_node_to_ycoord(noeuds_faces[0])
+                xb = mesh_obj.get_node_to_xcoord(noeuds_faces[1])
+                yb = mesh_obj.get_node_to_xcoord(noeuds_faces[1])
+                
+                
+                x_milieu = (xa+xb)/2
+                y_milieu = (yb+ya)/2
+                
+                # Dx et Dy
+                xtg = coordonnees_elements_x[neighbours_elements[0]]
+                ytg = coordonnees_elements_y[neighbours_elements[0]]
+                
+                dx = (xtg - x_milieu)
+                dy = (ytg - y_milieu)
+                
+                # Pour les arêtes internes 
+                
+                ALS = np.zeros((2,2))
+                
+                # Création des différents paramèetres de la matrice 2x2
+                
+                ALS[0,0]= dx*dx
+                ALS[1,0]= dx*dy
+                ALS[0,1]= dy*dx
+                ALS[1,1]= dy*dy
+                # Remplissage
+                
+                ATA[Tg] += ALS
+                
+                Phi_A =  phi(x_milieu,y_milieu)
+                Phi_tg = phi(xtg,ytg) # Modifié pour la valeur précédente 
+                
+                B[Tg,0] = B[Tg,0] + (x_milieu - xtg) * (Phi_A - Phi_tg)
+                B[Tg,1] = B[Tg,1] + (y_milieu - ytg) * (Phi_A - Phi_tg)
+                
+                
+            if ( bc_type == 'NEUMANN' ) :
+                # Neumann
+                noeuds_faces = mesh_obj.get_face_to_nodes(i)
+                
+                xa = mesh_obj.get_node_to_xcoord(noeuds_faces[0])
+                ya = mesh_obj.get_node_to_ycoord(noeuds_faces[0])
+                xb = mesh_obj.get_node_to_xcoord(noeuds_faces[1])
+                yb = mesh_obj.get_node_to_xcoord(noeuds_faces[1])
+                
+                nx,ny = normal(xa,ya,xb,yb)
+                
+                xtg = coordonnees_elements_x[neighbours_elements[0]]
+                ytg = coordonnees_elements_y[neighbours_elements[0]] 
+                
+                x_milieu = ( mesh_obj.get_node_to_xcoord(noeuds_faces[1]) + mesh_obj.get_node_to_xcoord(noeuds_faces[0]))/2
+                y_milieu = ( mesh_obj.get_node_to_ycoord(noeuds_faces[1]) + mesh_obj.get_node_to_ycoord(noeuds_faces[0]))/2
+                
+                dx1 =((x_milieu-xtg))
+                dy1 = ((y_milieu-ytg))
+                
+                dx = (dx1*nx+dy1*ny)*nx
+                dy = (dx1*nx + dy1*ny)*ny
+                
+                # Matric intermédiaire
+                ALS = np.zeros((2,2))
+                
+                # Création des différents paramètres de la matrice 2x2
+                
+                ALS[0,0]= dx*dx
+                ALS[1,0]= ALS[0,1]= dy*dx
+                ALS[1,1]= dy*dy
+                
+                
+                
+                # Remplissage 
+                ATA[Tg] += ALS
+                
+                xtg = coordonnees_elements_x[neighbours_elements[0]]
+                ytg = coordonnees_elements_y[neighbours_elements[0]]
+                
+                dx = ((x_milieu-xtg)*nx + (y_milieu-ytg)*ny)*nx
+                dy = ((x_milieu-xtg)*nx + (y_milieu-ytg)*ny)*ny
+                
+                Phi_A = bc_number # phi(x_milieu,y_milieu) # Phi milieu 
+                Phi_N = bc_number
+                
+                delta_phi = ((x_milieu-xtg)*nx + (y_milieu-ytg)*ny)*Phi_N
+                
+                B[Tg,0] = B[Tg,0] + dx * delta_phi
+                B[Tg,1] = B[Tg,1] + dy * delta_phi
+                
+                
+                
+            if (bc_type == 'LIBRE'):
+               B[Tg,0] = B[Tg,0] 
+               B[Tg,1] = B[Tg,1] 
+
+        # Pour les arrêtes internes
+        
+        if neighbours_elements[1] != -1 :
+            
+            # Coordonnées X triangles 
+            
+            xtg = coordonnees_elements_x[neighbours_elements[0]]
+            xtd = coordonnees_elements_x[neighbours_elements[1]]
+            
+            # Coordonnées Y triangles
+            
+            ytg = coordonnees_elements_y[neighbours_elements[0]]
+            ytd = coordonnees_elements_y[neighbours_elements[1]]
+            
+            # Récupération des dx et dy pour une arrête
+            
+            dx = xtg - xtd
+            dy = ytg - ytd
+            
+            # Pour les arêtes internes
+            
+            ALS = np.zeros((2,2))
+            
+            # Création des différents paramèetres de la matrice 2x2
+            
+            ALS[0,0]= dx*dx
+            ALS[1,0]= dx*dy
+            ALS[0,1]= dy*dx
+            ALS[1,1]= dy*dy
+            
+            ATA[Tg]+= ALS
+            ATA[Td]+= ALS
+            
+            # Remplissage de B 
+            
+            Phi_td = phi(xtd,ytd)#Modification
+            Phi_tg = phi(xtg,ytg)#Modification 
+            
+            B[Tg,0] = B[Tg,0] + (xtd-xtg) * (Phi_td -Phi_tg)
+            B[Tg,1] = B[Tg,1] + (ytd-ytg) * (Phi_td -Phi_tg)
+            B[Td,0] = B[Td,0] + (xtd-xtg) * (Phi_td -Phi_tg)
+            B[Td,1] = B[Td,1] + (ytd-ytg) * (Phi_td -Phi_tg)
+            
+    # Création de la matrice ATAI    
+    
+    ATAI = np.zeros((f,2,2))
+    
+    # BOucle sur les triangles 
+    
+    for i in range(number_of_elements):
+        
+        AL = ATA[i] # Sélection de chaque élément
+        ALI = np.linalg.inv(AL) # Inversion de chaque élément
+        ATAI[i]= ALI # Ajout à la nouvelle matrice
+    
+    # Création du gradient 
+    
+    Grad =np.zeros((f,2))
+    
+    # Résolution numérique 
+    
+    for i in range(number_of_elements):
+        
+        Grad[i] = np.dot(ATAI[i],B[i]) # Multiplication des deux matrices
+        
+    return Grad
+
+#%%
+def reconstruction_least_square(mesh_obj,bcdata,phi,solution):
+    
+    bc_types = [item[0] for item in bcdata]  # Extrait la première valeur de chaque tuple
+    bc_numbers = [item[1] for item in bcdata]
+    
+    #Création des données
+    number_of_faces = mesh_obj.number_of_faces
+    number_of_elements = mesh_obj.number_of_elements
+    
+    # Création des coordonnées des éléments 
+    
+    coordonnees_elements_x = []
+    coordonnees_elements_y = []
+    
+    voisins = []
+    
+    f = mesh_obj.number_of_elements
+    a =mesh_obj.number_of_faces
+    s = mesh_obj.number_of_nodes
+    bcdata =mesh_obj.get_boundary_faces_to_tag()
+    
+    # Création de la matrice de calcul ATA 
+    
+    ATA = np.zeros((f,2,2))
+    
+    # Création de la matrice B 
+    
+    B = np.zeros((f,2))
+    
+    for i in range(number_of_elements):
+        
+        # Récupération des différents noeuds autour d'un éléments
+        
+        start = mesh_obj.get_element_to_nodes_start(i)
+        fin = mesh_obj.get_element_to_nodes_start(i+1)
+        noeuds_i_elements = mesh_obj.element_to_nodes[start:fin] 
+        
+        
+        # Création du centre gémoétrique des différentes formes 
+        
+        x_e, y_e = centre_element_2D(mesh_obj, i)
+        
+        # Récupération dans deux listes distinctes 
+        
+        coordonnees_elements_x.append(x_e)
+        coordonnees_elements_y.append(y_e)  
+        
+    # Parcours de l'ensemble des arrêtes pour la création des différentes matrices 
+    
+    for i in range(number_of_faces):
+        neighbours_elements = mesh_obj.get_face_to_elements(i)
+        # Récupération des éléments voisins
+        voisins.append(neighbours_elements)
+        
+        Tg,Td = neighbours_elements
+        
+        if neighbours_elements[1] == -1 : # pour les faces frontières 
+            
+            tag = mesh_obj.get_boundary_face_to_tag(i)
+            bc_type = bc_types[tag]
+            bc_number = bc_numbers [tag]
+            
+            
+            
+            if ( bc_type == 'DIRICHLET' ) :
+                # DIRICHLET
+                # Création du centre de l'arrête 
+                noeuds_faces = mesh_obj.get_face_to_nodes(i)
+                
+                # Milieu
+                
+                xa = mesh_obj.get_node_to_xcoord(noeuds_faces[0])
+                ya = mesh_obj.get_node_to_ycoord(noeuds_faces[0])
+                xb = mesh_obj.get_node_to_xcoord(noeuds_faces[1])
+                yb = mesh_obj.get_node_to_xcoord(noeuds_faces[1])
+                
+                
+                x_milieu = (xa+xb)/2
+                y_milieu = (yb+ya)/2
+                
+                # Dx et Dy
+                xtg = coordonnees_elements_x[neighbours_elements[0]]
+                ytg = coordonnees_elements_y[neighbours_elements[0]]
+                
+                dx = (xtg - x_milieu)
+                dy = (ytg - y_milieu)
+                
+                # Pour les arêtes internes 
+                
+                ALS = np.zeros((2,2))
+                
+                # Création des différents paramèetres de la matrice 2x2
+                
+                ALS[0,0]= dx*dx
+                ALS[1,0]= dx*dy
+                ALS[0,1]= dy*dx
+                ALS[1,1]= dy*dy
+                # Remplissage
+                
+                ATA[Tg] += ALS
+                
+                Phi_A =  phi(x_milieu,y_milieu)
+                Phi_tg = solution[Tg] # Modifié pour la valeur précédente 
+                
+                B[Tg,0] = B[Tg,0] + (x_milieu - xtg) * (Phi_A - Phi_tg.item())
+                B[Tg,1] = B[Tg,1] + (y_milieu - ytg) * (Phi_A - Phi_tg.item())
+                
+                
+            if ( bc_type == 'NEUMANN' ) :
+                # Neumann
+                noeuds_faces = mesh_obj.get_face_to_nodes(i)
+                
+                xa = mesh_obj.get_node_to_xcoord(noeuds_faces[0])
+                ya = mesh_obj.get_node_to_ycoord(noeuds_faces[0])
+                xb = mesh_obj.get_node_to_xcoord(noeuds_faces[1])
+                yb = mesh_obj.get_node_to_xcoord(noeuds_faces[1])
+                
+                nx,ny = normal(xa,ya,xb,yb)
+                
+                xtg = coordonnees_elements_x[neighbours_elements[0]]
+                ytg = coordonnees_elements_y[neighbours_elements[0]] 
+                
+                x_milieu = ( mesh_obj.get_node_to_xcoord(noeuds_faces[1]) + mesh_obj.get_node_to_xcoord(noeuds_faces[0]))/2
+                y_milieu = ( mesh_obj.get_node_to_ycoord(noeuds_faces[1]) + mesh_obj.get_node_to_ycoord(noeuds_faces[0]))/2
+                
+                dx1 =((x_milieu-xtg))
+                dy1 = ((y_milieu-ytg))
+                
+                dx = (dx1*nx+dy1*ny)*nx
+                dy = (dx1*nx + dy1*ny)*ny
+                
+                # Matric intermédiaire
+                ALS = np.zeros((2,2))
+                
+                # Création des différents paramètres de la matrice 2x2
+                
+                ALS[0,0]= dx*dx
+                ALS[1,0]= ALS[0,1]= dy*dx
+                ALS[1,1]= dy*dy
+                
+                
+                
+                # Remplissage 
+                ATA[Tg] += ALS
+                
+                xtg = coordonnees_elements_x[neighbours_elements[0]]
+                ytg = coordonnees_elements_y[neighbours_elements[0]]
+                
+                dx = ((x_milieu-xtg)*nx + (y_milieu-ytg)*ny)*nx
+                dy = ((x_milieu-xtg)*nx + (y_milieu-ytg)*ny)*ny
+                
+                Phi_A = bc_number # phi(x_milieu,y_milieu) # Phi milieu 
+                Phi_N = bc_number
+                
+                delta_phi = ((x_milieu-xtg)*nx + (y_milieu-ytg)*ny)*Phi_N
+                
+                B[Tg,0] = B[Tg,0] + dx * delta_phi
+                B[Tg,1] = B[Tg,1] + dy * delta_phi
+                
+                
+                
+            if (bc_type == 'LIBRE'):
+               B[Tg,0] = B[Tg,0] 
+               B[Tg,1] = B[Tg,1] 
+
+        # Pour les arrêtes internes
+        
+        if neighbours_elements[1] != -1 :
+            
+            # Coordonnées X triangles 
+            
+            xtg = coordonnees_elements_x[neighbours_elements[0]]
+            xtd = coordonnees_elements_x[neighbours_elements[1]]
+            
+            # Coordonnées Y triangles
+            
+            ytg = coordonnees_elements_y[neighbours_elements[0]]
+            ytd = coordonnees_elements_y[neighbours_elements[1]]
+            
+            # Récupération des dx et dy pour une arrête
+            
+            dx = xtg - xtd
+            dy = ytg - ytd
+            
+            # Pour les arêtes internes
+            
+            ALS = np.zeros((2,2))
+            
+            # Création des différents paramèetres de la matrice 2x2
+            
+            ALS[0,0]= dx*dx
+            ALS[1,0]= dx*dy
+            ALS[0,1]= dy*dx
+            ALS[1,1]= dy*dy
+            
+            ATA[Tg]+= ALS
+            ATA[Td]+= ALS
+            
+            # Remplissage de B 
+            
+            Phi_td = solution[Td]#Modification
+            Phi_tg = solution[Tg]#Modification 
+            
+            B[Tg,0] = B[Tg,0] + (xtd-xtg) * (Phi_td.item() -Phi_tg.item())
+            B[Tg,1] = B[Tg,1] + (ytd-ytg) * (Phi_td.item() -Phi_tg.item())
+            B[Td,0] = B[Td,0] + (xtd-xtg) * (Phi_td.item() -Phi_tg.item())
+            B[Td,1] = B[Td,1] + (ytd-ytg) * (Phi_td.item() -Phi_tg.item())
+            
+    # Création de la matrice ATAI    
+    
+    ATAI = np.zeros((f,2,2))
+    
+    # BOucle sur les triangles 
+    
+    for i in range(number_of_elements):
+        
+        AL = ATA[i] # Sélection de chaque élément
+        ALI = np.linalg.inv(AL) # Inversion de chaque élément
+        ATAI[i]= ALI # Ajout à la nouvelle matrice
+    
+    # Création du gradient 
+    
+    Grad =np.zeros((f,2))
+    
+    # Résolution numérique 
+    
+    for i in range(number_of_elements):
+        
+        Grad[i] = np.dot(ATAI[i],B[i]) # Multiplication des deux matrices
+        
+    return Grad
+
+
+
+
+
+
+
+#%%
+
+gamma =1 
+matrice = 0
+bcdata = (['DIRICHLET', phi ], ['LIBRE', phi],
+          ['LIBRE', phi], ['DIRICHLET', phi])
+
+
+Grad = least_square(mesh_obj1,bcdata,phi)
+solution_1 = diffusion2D(mesh_obj1,bcdata,Grad,gamma,phi,matrice)
+
+solution = solution_1
+for i in range (10):
+    Grad = reconstruction_least_square(mesh_obj1,bcdata,phi,solution)
+    solution = diffusion2D(mesh_obj1,bcdata,Grad,gamma,phi,matrice)
+    
+    
+# Affichage de champ scalaire avec pyvista
+nodes, elements = plotter.prepare_data_for_pyvista(mesh_obj1)
+pv_mesh = pv.PolyData(nodes, elements)
+pv_mesh['solution_1'] = solution_1
+
+pl = pvQt.BackgroundPlotter()
+# Tracé du champ
+print("\nVoir le champ moyenne dans la fenêtre de PyVista \n")
+pl.add_mesh(pv_mesh, show_edges=True, scalars="solution_1", cmap="RdBu")
+    
+
+    
+    
+  #%% Estimation de l'ordre de convergence 
+  
+def surface_cellule(noeuds, mesh_obj):
+    n = len(noeuds)
+    surface = 0
+    points = []
+    
+    # Récupérer les coordonnées (x, y) des noeuds associés à la cellule
+    for i in range(n):
+        x, y = mesh_obj.get_node_to_xycoord(noeuds[i])  # Utiliser noeuds[i] pour les bons indices
+        points.append((x, y))
+        
+    # Calcul de la surface avec la formule du déterminant (shoelace)
+    for i in range(n):
+        x1, y1 = points[i]
+        x2, y2 = points[(i + 1) % n]  # Le sommet suivant, en bouclant sur le premier point
+        surface += x1 * y2 - x2 * y1
+    
+    return abs(surface) / 2
+
+def surface_moyenne(sol_num,mesh_obj):
+    moyenne = 0
+    
+    
+    for i in range(len(sol_num)):
+        # Récupération des nœuds associés à l'élément i
+        start = mesh_obj.get_element_to_nodes_start(i)
+        fin = mesh_obj.get_element_to_nodes_start(i + 1)
+        noeuds_i_elements = mesh_obj.element_to_nodes[start:fin]
+        
+        # Calcul de la surface de la cellule
+        taille_cellule = surface_cellule(noeuds_i_elements, mesh_obj)
+        moyenne += taille_cellule**2
+    moyenne = np.sqrt(moyenne/len(sol_num))
+    
+    return moyenne  
+
+
+gamma =1 
+matrice = 0
+bcdata = (['DIRICHLET', phi ], ['LIBRE', phi],
+          ['LIBRE', phi], ['DIRICHLET', phi])
+
+
+Grad = least_square(mesh_obj1,bcdata,phi)
+solution_1 = diffusion2D(mesh_obj1,bcdata,Grad,gamma,phi,matrice)
+
+solution = solution_1
+for i in range (5):
+    Grad = reconstruction_least_square(mesh_obj1,bcdata,phi,solution)
+    solution = diffusion2D(mesh_obj1,bcdata,Grad,gamma,phi,matrice)
+    print(solution)
+    
+    
+# Affichage de champ scalaire avec pyvista
+nodes, elements = plotter.prepare_data_for_pyvista(mesh_obj1)
+pv_mesh = pv.PolyData(nodes, elements)
+pv_mesh['solution_1'] = solution_1
+
+pl = pvQt.BackgroundPlotter()
+# Tracé du champ
+print("\nVoir le champ moyenne dans la fenêtre de PyVista \n")
+pl.add_mesh(pv_mesh, show_edges=True, scalars="solution_1", cmap="RdBu")
+
+h1 = surface_moyenne(solution, mesh_obj1)
+    
+mesh_parameters = {'mesh_type': 'QUAD',
+                   'lc': 0.01
+                   }
+mesh_obj1 = mesher.rectangle([0.0, 1.0, 0.0, 1.0], mesh_parameters)
+conec = MeshConnectivity(mesh_obj1)
+conec.compute_connectivity()  
+
+Grad = least_square(mesh_obj1,bcdata,phi)
+solution_1 = diffusion2D(mesh_obj1,bcdata,Grad,gamma,phi,matrice)
+
+solution = solution_1
+for i in range (5):
+    Grad = reconstruction_least_square(mesh_obj1,bcdata,phi,solution)
+    solution = diffusion2D(mesh_obj1,bcdata,Grad,gamma,phi,matrice)
+    print(solution)
+    
+    
+# Affichage de champ scalaire avec pyvista
+nodes, elements = plotter.prepare_data_for_pyvista(mesh_obj1)
+pv_mesh = pv.PolyData(nodes, elements)
+pv_mesh['solution_1'] = solution_1
+
+pl = pvQt.BackgroundPlotter()
+# Tracé du champ
+print("\nVoir le champ moyenne dans la fenêtre de PyVista \n")
+pl.add_mesh(pv_mesh, show_edges=True, scalars="solution_1", cmap="RdBu")
+
+h2 = surface_moyenne(solution, mesh_obj1)
+
+mesh_parameters = {'mesh_type': 'QUAD',
+                   'lc': 0.02
+                   }
+mesh_obj1 = mesher.rectangle([0.0, 1.0, 0.0, 1.0], mesh_parameters)
+conec = MeshConnectivity(mesh_obj1)
+conec.compute_connectivity()  
+
+Grad = least_square(mesh_obj1,bcdata,phi)
+solution_1 = diffusion2D(mesh_obj1,bcdata,Grad,gamma,phi,matrice)
+
+solution = solution_1
+for i in range (5):
+    Grad = reconstruction_least_square(mesh_obj1,bcdata,phi,solution)
+    solution = diffusion2D(mesh_obj1,bcdata,Grad,gamma,phi,matrice)
+    print(solution)
+    
+    
+# Affichage de champ scalaire avec pyvista
+nodes, elements = plotter.prepare_data_for_pyvista(mesh_obj1)
+pv_mesh = pv.PolyData(nodes, elements)
+pv_mesh['solution_1'] = solution_1
+
+pl = pvQt.BackgroundPlotter()
+# Tracé du champ
+print("\nVoir le champ moyenne dans la fenêtre de PyVista \n")
+pl.add_mesh(pv_mesh, show_edges=True, scalars="solution_1", cmap="RdBu")
+
+h3 = surface_moyenne(solution, mesh_obj1)
+
+r = h2/h1
+r1 = h3/h2
+print(r)
+print(r1)
+
+
+
+
+
+
+    
+    
