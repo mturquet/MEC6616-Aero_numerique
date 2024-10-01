@@ -14,14 +14,7 @@ class MaillageQuad():
         from meshConnectivity import MeshConnectivity
         from meshPlotter import MeshPlotter
         import matplotlib.pyplot as plt
-        # %% Import des librairies
-        import numpy as np
-        import pyvista as pv
-        import pyvistaqt as pvQt
-        from meshGenerator import MeshGenerator
-        from meshConnectivity import MeshConnectivity
-        from meshPlotter import MeshPlotter
-        import matplotlib.pyplot as plt
+
 
         # %% Paramètres
         L = 0.02  # Longueur (m)
@@ -32,16 +25,16 @@ class MaillageQuad():
         k = 0.5  # Conductivité thermique (W/m·K)
         q = 1e6  # Source de chaleur (W/m³)
 
-        Nx = 5  # Nombre de divisions en x
-        Ny = 5  # Nombre de divisions en y
+        Nx = 10 # Nombre de divisions en x
+        Ny = 10  # Nombre de divisions en y
         lc = L / 5  # Longueur caractéristique
         dx = L / Nx
 
         mesher = MeshGenerator()
         plotter = MeshPlotter()
         mesh_parameters1 = {'mesh_type': 'QUAD',
-                            'Nx': 5,
-                            'Ny': 5
+                            'Nx': 10,
+                            'Ny': 10
                             }
 
         mesh_obj1 = mesher.rectangle([0.0, L, 0.0, L], mesh_parameters1)
@@ -190,12 +183,7 @@ class MaillageQuad():
             Taille = surface_moyenne(t, mesh_obj)
             B += S * Taille
             for i in range(number_of_elements):
-                # Récupération des différents noeuds autour d'un éléments
-
-                # start = mesh_obj.get_element_to_nodes_start(i)
-                # fin = mesh_obj.get_element_to_nodes_start(i+1)
-                # noeuds_i_elements = mesh_obj.element_to_nodes[start:fin]
-
+    
                 # Création du centre gémoétrique des différentes formes
 
                 x_e, y_e = centre_element_2D(mesh_obj, i)
@@ -215,8 +203,6 @@ class MaillageQuad():
                     neighbours_elements = mesh_obj.get_face_to_elements(i)
                     nodes = mesh_obj.get_face_to_nodes(i)
                     Tg, Td = neighbours_elements
-                    grad_tg = Grad[Tg]
-                    grad_td = Grad[Td]
 
                     # CRéation des points de la l'arrête
 
@@ -351,11 +337,13 @@ class MaillageQuad():
 
                         if matrice == 1:
                             Sd_cross_i = -gamma * (PKSIETA / PNKSI) * (
-                                        (phi(xb, yb) - phi(xa, ya)) / delta_eta) * delta_Ai
+                                        ((grad_a[0] + grad_b[0]) / 2) * (xb - xa) / delta_Ai) * (
+                                                     ((grad_a[1] + grad_b[1]) / 2) * (yb - ya) / delta_Ai) * delta_Ai
+                            
 
                         valeur = bc_number
 
-                        B[Tg] = B[Tg] + valeur
+                        B[Tg] = B[Tg] + valeur*gamma*delta_Ai
 
                     if bc_type == 'DIRICHLET':
                         # Création des paramètres
@@ -405,7 +393,7 @@ class MaillageQuad():
                                                  ((grad_a[1] + grad_b[1]) / 2) * (yb - ya) / delta_Ai)
 
                         A[Tg][Tg] = A[Tg][Tg] + Di
-                        B[Tg] = B[Tg] + gamma * 2 * valeur  # + Sd_cross_i
+                        B[Tg] = B[Tg] + Di * valeur + Sd_cross_i
 
                     if (bc_type == 'LIBRE'):
                         B[Tg, 0] = B[Tg, 0]
@@ -1015,7 +1003,7 @@ class MaillageTriangles():
 
         Nx = 5          # Nombre de divisions en x
         Ny = 5          # Nombre de divisions en y
-        lc = L/5     # Longueur caractéristique
+        lc = L/5   # Longueur caractéristique
         dx=L/Nx
           
         mesher = MeshGenerator()
@@ -1170,7 +1158,7 @@ class MaillageTriangles():
             B = np.zeros((number_of_elements,1))
             t=np.zeros(number_of_elements)
             Taille=surface_moyenne(t, mesh_obj)
-            B += S*Taille
+            B += S *Taille
             for i in range(number_of_elements):
                 
                 # Récupération des différents noeuds autour d'un éléments
@@ -1336,7 +1324,7 @@ class MaillageTriangles():
                         
                         valeur = bc_number
                     
-                        B[Tg] = B[Tg] + valeur
+                        B[Tg] = B[Tg] + valeur*gamma*delta_Ai
                         
                         
                     if bc_type == 'DIRICHLET':
@@ -1384,7 +1372,7 @@ class MaillageTriangles():
                         Sd_cross_i = -gamma*(PKSIETA/PNKSI)*delta_Ai*(((grad_a[0]+grad_b[0])/2)*(xb-xa) /delta_Ai)*(((grad_a[1]+grad_b[1])/2)*(yb-ya) /delta_Ai)
                         
                         A[Tg][Tg] = A[Tg][Tg] + Di
-                        B[Tg] = B[Tg]+ gamma*2*valeur 
+                        B[Tg] = B[Tg]+  Di*valeur +Sd_cross_i   #gamma*2*valeur 
                         
                     if (bc_type == 'LIBRE'):
                        B[Tg,0] = B[Tg,0] 
@@ -1577,7 +1565,7 @@ class MaillageTriangles():
                         
                         valeur = bc_number
                     
-                        B[Tg] = B[Tg] + valeur
+                        B[Tg] = B[Tg] + valeur*gamma*delta_Ai
                         
                         
                     if bc_type == 'DIRICHLET':
@@ -1625,7 +1613,7 @@ class MaillageTriangles():
                         Sd_cross_i = -gamma*(PKSIETA/PNKSI)*delta_Ai*(((grad_a[0]+grad_b[0])/2)*(xb-xa) /delta_Ai)*(((grad_a[1]+grad_b[1])/2)*(yb-ya) /delta_Ai)
                         
                         A[Tg][Tg] = A[Tg][Tg] + Di
-                        B[Tg] = B[Tg]+ gamma*2*valeur
+                        B[Tg] = B[Tg]+ Di*valeur
                         
                     if (bc_type == 'LIBRE'):
                        B[Tg,0] = B[Tg,0] 
