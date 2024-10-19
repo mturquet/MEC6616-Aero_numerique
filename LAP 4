@@ -1,0 +1,516 @@
+import numpy as np
+import sympy as sp
+import scipy.sparse as sparse
+import scipy.sparse.linalg as spla
+import matplotlib.pyplot as plt
+from matplotlib.tri import Triangulation
+from mesh import Mesh
+from meshGenerator import MeshGenerator
+from meshConnectivity import MeshConnectivity
+from meshPlotter import MeshPlotter
+import pyvista as pv
+import pyvistaqt as pvQt
+
+class Couetteclassique :
+    def __init__(self, x_min, x_max, y_min, y_max):
+        self.x_min, self.x_max = x_min, x_max
+        self.y_min, self.y_max = y_min, y_max
+        self.rho = 1.0
+        self.Cp = 1.0
+        self.mu = 1
+        self.U = 1
+        self.b = 1
+        
+        # Définition des symboles pour les valeurs x et y 
+        self.x, self.y = sp.symbols('x y')
+        
+        # Création des champs u et v et de la solution littérale manufacturée 
+        self.P = 0
+        self.u = self.y *(1-self.P*(1-self.y))
+        self.v = 0
+        self.Couette = self.y/self.b - (1/(2*self.mu*self.U))*(-2+self.P)*(self.y/self.b)*(1-(self.y/self.b))
+        
+        
+        # Création du terme source 
+        self.S_func_generator = self.compute_terme_source()
+        
+        # Créations des fonctions python 
+        self.u_func = sp.lambdify((self.x, self.y), self.u, 'numpy')
+        self.v_func = sp.lambdify((self.x, self.y), self.v, 'numpy')
+        self.Couette_func = sp.lambdify((self.x, self.y), self.Couette, 'numpy')
+        
+        
+        self.mesh = None
+        self.face_areas = None
+        self.cell_volumes = None
+        self.normale_face = None
+        self.centre_cellule = None
+        
+        
+    def compute_cell_volumes(self):
+        cell_volumes = np.zeros(self.mesh.get_number_of_elements())
+        for i_elem in range(self.mesh.get_number_of_elements()):
+            nodes = self.mesh.get_element_to_nodes(i_elem)
+            if len(nodes) == 3:  # Triangles
+                x1, y1 = self.mesh.get_node_to_xycoord(nodes[0])
+                x2, y2 = self.mesh.get_node_to_xycoord(nodes[1])
+                x3, y3 = self.mesh.get_node_to_xycoord(nodes[2])
+                cell_volumes[i_elem] = 0.5 * abs((x2 - x1)*(y3 - y1) - (x3 - x1)*(y2 - y1))
+            elif len(nodes) == 4:  # Quadrilatères
+                x1, y1 = self.mesh.get_node_to_xycoord(nodes[0])
+                x2, y2 = self.mesh.get_node_to_xycoord(nodes[1])
+                x3, y3 = self.mesh.get_node_to_xycoord(nodes[2])
+                x4, y4 = self.mesh.get_node_to_xycoord(nodes[3])
+                cell_volumes[i_elem] = 0.5 * abs((x3 - x1)*(y4 - y2) - (x4 - x2)*(y3 - y1)) # COM : Correction TPP1
+        return cell_volumes
+        
+    def compute_terme_source(self):
+        P = sp.symbols('P')
+       #Calcul des termes source pas de least square pour l'instant
+        
+        SGPX = -2*P 
+        SGPY = 0
+        
+       # Création de la fonction source : fonction 
+        def S_func_generator(P_val):
+            return SGPX #sp.lambdify((self.x, self.y), Sx.subs(P, P_val), 'numpy'),sp.lambdify((self.x, self.y), Sy.subs(P, P_val), 'numpy')
+        
+        return S_func_generator
+    
+    # Classique 
+    def generate_mesh(self, mesh_type='TRI', Nx =5,Ny =5):
+        mesh_generator = MeshGenerator()
+        mesh_parameters = {
+            'mesh_type': mesh_type,
+            'Nx': Nx,
+            'Ny' : Ny
+            
+        }
+        self.mesh = mesh_generator.rectangle([self.x_min, self.x_max, self.y_min, self.y_max], mesh_parameters)
+        mesh_connectivity = MeshConnectivity(self.mesh)
+        mesh_connectivity.compute_connectivity()
+        self.compute_mesh_properties()  
+        return self.mesh
+    
+    def plot_mesh(self):
+        plotter = MeshPlotter()
+        plotter.plot_mesh(self.mesh, label_elements=True, label_faces=True)
+        self.compute_cross_diffusion_vectors()
+        
+    # COM    
+    def compute_cross_diffusion_vectors(self):
+        cross_diff_vectors = np.zeros((self.mesh.get_number_of_faces(), 2))
+        for i_face in range(self.mesh.get_number_of_faces()):
+            left_cell, right_cell = self.mesh.get_face_to_elements(i_face)
+            face_center = np.mean([self.mesh.get_node_to_xycoord(node) for node in self.mesh.get_face_to_nodes(i_face)], axis=0)
+            if right_cell != -1:  # Internal face
+                cell_vector = self.centre_cellule[right_cell] - self.centre_cellule[left_cell]
+                cross_diff_vectors[i_face] = face_center - (self.centre_cellule[left_cell] + 0.5 * cell_vector)
+            else:  # Boundary face
+                cross_diff_vectors[i_face] = face_center - self.centre_cellule[left_cell]
+        return cross_diff_vectors
+    
+    
+    # Création des paramètres propres au maillage pour les utiliser plus loin            
+    def compute_mesh_properties(self):
+        self.face_areas = self.compute_longueur_face()
+        self.cell_volumes = self.compute_cell_volumes()
+        self.normale_face = self.compute_normale_face()
+        self.centre_cellule = self.compute_centre_cellule()
+        self.cross_diff_vectors = self.compute_cross_diffusion_vectors() 
+        
+    # Définition de la surface des cellules 
+    def compute_longueur_face(self):
+        surface_face= np.zeros(self.mesh.get_number_of_faces())
+        for i_face in range(self.mesh.get_number_of_faces()):
+            nodes = self.mesh.get_face_to_nodes(i_face)
+            x1, y1 = self.mesh.get_node_to_xycoord(nodes[0])
+            x2, y2 = self.mesh.get_node_to_xycoord(nodes[1])
+            surface_face[i_face] = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        return surface_face
+    
+    # Nouvelle fonction de création des volumes 
+    def compute_cell_volumes(self):
+        cell_volumes = np.zeros(self.mesh.get_number_of_elements())
+        for i_elem in range(self.mesh.get_number_of_elements()):
+            nodes = self.mesh.get_element_to_nodes(i_elem)
+            if len(nodes) == 3:  # Triangles
+                x1, y1 = self.mesh.get_node_to_xycoord(nodes[0])
+                x2, y2 = self.mesh.get_node_to_xycoord(nodes[1])
+                x3, y3 = self.mesh.get_node_to_xycoord(nodes[2])
+                cell_volumes[i_elem] = 0.5 * abs((x2 - x1)*(y3 - y1) - (x3 - x1)*(y2 - y1))
+            elif len(nodes) == 4:  # Quadrilatères
+                x1, y1 = self.mesh.get_node_to_xycoord(nodes[0])
+                x2, y2 = self.mesh.get_node_to_xycoord(nodes[1])
+                x3, y3 = self.mesh.get_node_to_xycoord(nodes[2])
+                x4, y4 = self.mesh.get_node_to_xycoord(nodes[3])
+                cell_volumes[i_elem] = 0.5 * abs((x3 - x1)*(y4 - y2) - (x4 - x2)*(y3 - y1)) # COM : Correction TPP1
+        return cell_volumes
+
+    def compute_normale_face(self):
+        normale_face = np.zeros((self.mesh.get_number_of_faces(), 2))
+        for i_face in range(self.mesh.get_number_of_faces()):
+            nodes = self.mesh.get_face_to_nodes(i_face)
+            x1, y1 = self.mesh.get_node_to_xycoord(nodes[0])
+            x2, y2 = self.mesh.get_node_to_xycoord(nodes[1])
+            nx = y2 - y1
+            ny = x1 - x2
+            norm = np.sqrt(nx**2 + ny**2)
+            normale_face[i_face] = [nx/norm, ny/norm]
+        return normale_face
+
+    def compute_centre_cellule(self):
+        centre_cellule = np.zeros((self.mesh.get_number_of_elements(), 2))
+        for i_elem in range(self.mesh.get_number_of_elements()):
+            nodes = self.mesh.get_element_to_nodes(i_elem)
+            x_coords = np.array([self.mesh.get_node_to_xcoord(node) for node in nodes])
+            y_coords = np.array([self.mesh.get_node_to_ycoord(node) for node in nodes])
+            centre_cellule[i_elem] = [np.mean(x_coords), np.mean(y_coords)]
+        return centre_cellule
+    
+    def compute_creation_u0(self):
+        u0 = np.zeros((self.mesh.get_number_of_elements(), 1))
+        return u0
+    
+    def compute_creation_v0(self):
+        v0 = np.zeros((self.mesh.get_number_of_elements(), 1))
+        return v0
+    
+    
+    
+    
+    def assemble_system(self, P,ui, scheme='centered'):
+        n_cells = self.mesh.get_number_of_elements() 
+        A = sparse.lil_matrix((n_cells, n_cells))
+        b = np.zeros(n_cells)
+        
+        S_func = self.S_func_generator(P) # Création de S en fonction de k 
+        
+        for i_face in range(self.mesh.get_number_of_faces()): # Pour toutes les arrêtes
+            left_cell, right_cell = self.mesh.get_face_to_elements(i_face)  # Triangle de gauche et de droite 
+            
+            if right_cell != -1:  #  Arrête non limites pour le LAP 4 
+                x_face, y_face = np.mean([self.mesh.get_node_to_xycoord(node) for node in self.mesh.get_face_to_nodes(i_face)], axis=0) # Récupération du centre de l'arrête
+                Fxi = (ui[left_cell]+ui[right_cell])/2
+                
+                Fyi = (ui[left_cell]+ui[right_cell])/2
+                velocity_dot_normal = Fxi * self.normale_face[i_face, 0] + Fyi* self.normale_face[i_face, 1] # récupération du produit scalaire
+                
+                # Terme convectif , ici corrigé pour le schéma du LAP4 
+                if scheme == 'centered':
+                    Fi =  velocity_dot_normal * self.face_areas[i_face]
+                    
+                    A[left_cell, right_cell] -= Fi
+                    A[right_cell, left_cell] += Fi
+                    A[left_cell, left_cell] += Fi
+                    A[right_cell, right_cell] -= Fi
+                
+                # Tout va bien là 
+                
+                elif scheme == 'upwind':
+                    coeff =  velocity_dot_normal * self.face_areas[i_face] # Tout va bien là
+                    if velocity_dot_normal > 0:
+                        A[right_cell, left_cell] += coeff
+                        A[left_cell, left_cell] -= coeff
+                    else:
+                        A[left_cell, right_cell] -= coeff
+                        A[right_cell, right_cell] += coeff
+                # C'est modifié aussi 
+                
+                # Terme diffusif avec cross_diff
+                
+                dx = self.centre_cellule[right_cell] - self.centre_cellule[left_cell]
+                distance = np.linalg.norm(dx)
+                diff_coeff = self.mu* self.face_areas[i_face] / distance
+                A[left_cell, right_cell] -= diff_coeff
+                A[right_cell, left_cell] -= diff_coeff
+                A[left_cell, left_cell] += diff_coeff
+                A[right_cell, right_cell] += diff_coeff
+                
+                # Correction Cross-diffusion 
+                cross_diff_vector = self.cross_diff_vectors[i_face]
+                cross_diff_coeff = self.mu * np.dot(cross_diff_vector, self.normale_face[i_face]) * self.face_areas[i_face] / distance**2
+                A[left_cell, left_cell] += cross_diff_coeff
+                A[right_cell, right_cell] += cross_diff_coeff
+                A[left_cell, right_cell] -= cross_diff_coeff
+                A[right_cell, left_cell] -= cross_diff_coeff
+            
+            else:  # Arrête Limite
+                x_face, y_face = np.mean([self.mesh.get_node_to_xycoord(node) for node in self.mesh.get_face_to_nodes(i_face)], axis=0)
+                T_boundary = self.Couette_func(x_face, y_face)
+                
+                # Terme diffusif avec la correction de  cross-diffusion (Dirichlet condition limite)
+                dx = np.array([x_face, y_face]) - self.centre_cellule[left_cell]
+                distance = np.linalg.norm(dx)
+                diff_coeff = self.mu * self.face_areas[i_face] / distance
+                A[left_cell, left_cell] += diff_coeff
+                b[left_cell] += diff_coeff * T_boundary
+                
+                # Correction Cross-diffusion pour limite
+                cross_diff_vector = self.cross_diff_vectors[i_face]
+                cross_diff_coeff = self.mu * np.dot(cross_diff_vector, self.normale_face[i_face]) * self.face_areas[i_face] / distance**2
+                A[left_cell, left_cell] += cross_diff_coeff
+                b[left_cell] += cross_diff_coeff * T_boundary
+                
+                #Terme de convection
+                u_face = self.u_func(x_face, y_face)
+                v_face = self.v_func(x_face, y_face)
+                velocity_dot_normal = u_face * self.normale_face[i_face, 0] + v_face * self.normale_face[i_face, 1]
+                if velocity_dot_normal < 0:  # Inflow
+                    conv_coeff = self.rho * self.Cp * velocity_dot_normal * self.face_areas[i_face]
+                    b[left_cell] -= conv_coeff * T_boundary
+        
+        # Terme source 
+        for i_cell in range(n_cells):
+            b[i_cell] += -2*P * self.cell_volumes[i_cell]# Pas top 
+        
+        return A.tocsr(), b
+    
+    
+    def get_boundary_type(self, x, y):
+        # Définis les conditions limites en fonction des différentes coordonnées
+        # POur ce problème on a exactement : 
+        if np.isclose(y, 1) or np.isclose(y, 0):
+            return 'Dirichlet'
+        elif np.isclose(x, 0) or np.isclose(x, 1):
+            return 'Neumann'
+        else:
+            raise ValueError(f"Point ({x}, {y}) is not on the boundary")
+    
+    def get_valeur_neumann(self, x, y):
+        # Valeur numérique de DT/dn à partir de Tmms(MMS)
+        dTdx = self.Tx * (-np.pi * np.sin(np.pi * x)) + self.Txy * y * np.pi * np.cos(np.pi * x * y) # Créer pour la forme si on change 
+        dTdy = self.Txy * x * np.pi * np.cos(np.pi * x * y)
+        
+        if np.isclose(y, -1):
+            return -dTdy  # normal is (0, -1)
+        elif np.isclose(y, 1):
+            return dTdy   # normal is (0, 1)
+        else:
+            raise ValueError(f"Point ({x}, {y}) is not on a Neumann boundary")
+
+    def approximation_condition_limite(self, cell_index, dTdn, normal):
+        # Approximation de Neumann à l'entrée 
+        cell_center = self.centre_cellule[cell_index]
+        distance_to_boundary = self.face_areas[cell_index] / 2  # Approximate
+        T_cell = self.T_mms_func(cell_center[0], cell_center[1])
+        T_boundary = T_cell - distance_to_boundary * dTdn
+        return T_boundary
+    
+    def solve_system(self, A, b):
+        return spla.spsolve(A, b)
+    
+    def compute_relaxation (self,upi,upi_prec,alpha=0.7):
+        n_cells = len(upi)
+        u_final = np.zeros((n_cells,1))
+        for i_elem in range (n_cells) :
+            solution_finale = alpha * upi[i_elem] + (1-alpha)*upi_prec[i_elem]
+            u_final[i_elem] = solution_finale
+        
+        return u_final
+    
+    # Fonction de vérification de convergence 
+    def compute_mesure_increment(upi,upi_prec,crit):
+        n_cells = len(upi)
+        delta_u = 0
+        for i_elem in range (n_cells) :
+            delta_u = abs(upi - upi_prec)
+        delta_u = delta_u/n_cells
+        if delta_u < crit :
+            return True
+        else :
+            return False
+        
+        
+    def compute_residu(self,Bu,Au_plus_1,ui_1):
+        M1 = Au_plus_1@ui_1
+        n_cells = len(Bu)
+        residu = 0
+        for i in range (n_cells):
+
+            residu += abs(M1[i]-Bu[i])
+            
+        return residu 
+       
+        
+       
+    
+    def plot_resultats(self, T_numerical, P, scheme='centered'):
+        grid = self.create_pyvista_grid(T_numerical)
+        
+        pl = pvQt.BackgroundPlotter()
+        pl.add_mesh(grid, show_edges=True, scalars="Temperature", cmap="RdBu")
+        contours = grid.contour(scalars='Temperature', isosurfaces=10)
+        pl.add_mesh(contours, color="White", line_width=2)
+        pl.add_text(f"Temperature Distribution (P={P}, scheme={scheme})", font_size=12)
+        pl.show()
+
+    def get_profil_temperature(self, grid, start_point, end_point):
+        line = grid.sample_over_line(start_point, end_point, resolution=100)
+        return line['Distance'], line['Temperature']
+
+    def create_pyvista_grid(self, T_values):
+        plotter = MeshPlotter()  
+        nodes, elements = plotter.prepare_data_for_pyvista(self.mesh)
+        points = np.array(nodes)
+        cells = elements
+        
+        cell_types = []
+        i = 0
+        while i < len(cells):
+            num_points = cells[i]
+            if num_points == 3:
+                cell_types.append(pv.CellType.TRIANGLE)
+            elif num_points == 4:
+                cell_types.append(pv.CellType.QUAD)
+            i += num_points + 1
+        
+        cell_types = np.array(cell_types)
+        
+        grid = pv.UnstructuredGrid(cells, cell_types, points)
+
+        if len(T_values) == grid.n_cells:
+            grid.cell_data['Temperature'] = T_values
+            grid = grid.cell_data_to_point_data()
+        elif len(T_values) == grid.n_points:
+            grid.point_data['Temperature'] = T_values
+        
+        return grid
+
+    def plot_cross_section_profiles(self, profiles, analytical_profile, title, xlabel):
+        plt.figure(figsize=(12, 8))
+        
+        for P, scheme, (distance, temperature) in profiles:
+            plt.plot(distance, temperature, label=f'P={P:.0e}, {scheme}')
+        
+        plt.plot(analytical_profile[0], analytical_profile[1], 'P--', label='Analytical')
+        
+        plt.xlabel(xlabel)
+        plt.ylabel('Temperature')
+        plt.title(title)
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+        
+    def plot_Couette(self,P=0):
+        plotter = MeshPlotter()  
+        nodes, elements = plotter.prepare_data_for_pyvista(self.mesh)
+        points = np.array(nodes)
+
+        x, y = sp.symbols('x y')
+        
+        Couette = y/self.b - (1/(2*self.mu*self.U))*(-2*P)*(y/self.b)*(1-(y/self.b))
+        
+        Couette_func = sp.lambdify((x, y), Couette, 'numpy')
+        
+        self.Couette_values = Couette_func(points[:, 0], points[:, 1])
+        
+        grid = self.create_pyvista_grid(self.Couette_values)
+        
+        pl = pvQt.BackgroundPlotter()
+        pl.add_mesh(grid, scalars='Temperature', show_edges=True, cmap="RdBu", clim=[self.Couette_values.min(), self.Couette_values.max()])
+        contours = grid.contour(scalars='Temperature', isosurfaces=10)
+        pl.add_mesh(contours, color="white", line_width=2)
+        pl.add_text('Couette Distribution', font_size=12)
+        pl.show()
+        
+    # Ca va pas du tout à corriger complétement 
+    def run_analysis(self, P_values, schemes, lc ,mesh_sizes,crit):
+        self.generate_mesh(lc)
+        self.plot_Couette()
+        self.plot_Couette(1)
+        self.plot_Couette(-3)
+        x_min, x_max = -1, 1
+        y_min, y_max = -1, 1
+        z_min, z_max = 0, 0
+        L=x_max-x_min
+        cross_sections = [
+            ("Vertical at x=0", [0, y_min, z_min], [0, y_max, z_max], "Distance along y"),
+            ("Vertical at x=0.5", [0.5, y_min, z_min], [0.5, y_max, z_max], "Distance along y"),
+            ("Horizontal at y=0", [x_min, 0, z_min], [x_max, 0, z_max], "Distance along x"),
+            ("Horizontal at y=0.5", [x_min, 0.5, z_min], [x_max, 0.5, z_max], "Distance along x")
+        ]
+     
+        for P in P_values:
+            ui = self.compute_creation_u0()
+            vi =self.compute_creation_v0()
+            A, b = self.assemble_system(P,ui)
+            T_numerical = self.solve_system(A, b)
+            self.plot_resultats(T_numerical, P)
+
+        for section_name, start_point, end_point, xlabel in cross_sections:
+            profiles = []
+            
+            for P in P_values:
+                for scheme in schemes:
+                    ui_prec = self.compute_creation_u0() # Création des deux premiers paramètres
+                    ui = self.compute_creation_u0()
+                    
+                    A, bu = self.assemble_system(P, ui) # Calcul par méthode de la TPP2
+                    ui_numerical = self.solve_system(A, bu) # Résolution du système
+                   
+                    ui_final = self.compute_relaxation(ui_numerical,ui_prec,0.8) #Méthode de relaxation 
+                    ui_prec = ui_final # Remise à niveau du précédent
+                    
+                    A, bu = self.assemble_system(P, ui_final) # Calcul de Ai+1
+                    
+                    
+                    
+                    residu = self.compute_residu(bu,A,ui_final)# Changement de residu 
+                    compteur = 1
+                    print(residu)
+                    while abs(residu) > crit : 
+                        compteur +=1
+                        print(compteur)
+                        
+                        A, bu = self.assemble_system(P, ui_final) # Calcul de A et bu de l'itération
+                        ui_numerical = self.solve_system(A, bu) # Première solu num
+                        ui_final = self.compute_relaxation(ui_numerical,ui_prec) # Relaxation
+                        ui_prec = ui_final # Mémoire prec 
+                        A, bu = self.assemble_system(P, ui_final) #Calcul de Ai+1
+                        residu = self.compute_residu(bu,A,ui_final) # Changement pour le résidu 
+                        print(residu)
+                        
+                        
+                    
+                grid = self.create_pyvista_grid(ui_final)
+                distance, temperature = self.get_profil_temperature(grid, start_point, end_point)
+                profiles.append((P, scheme, (distance, temperature)))
+            
+            grid_analytical = self.create_pyvista_grid(self.Couette_values)
+            analytical_profile = self.get_profil_temperature(grid_analytical, start_point, end_point)
+            
+            self.plot_cross_section_profiles(profiles, analytical_profile, f"Temperature Distribution - {section_name}", xlabel)
+       
+    
+    
+def main():
+    P_values = [0,1,-3]
+    schemes = ['centered']
+    lc = 2
+    mesh_sizes = [lc,lc/2]
+    analyser = Couetteclassique(0,1,0,1)
+    analyser.run_analysis(P_values,schemes,lc,mesh_sizes,0.000001)
+    
+        
+if __name__ == "__main__":
+    main()     
+            
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
