@@ -1,0 +1,734 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Oct 23 07:44:10 2024
+
+@author: mathisturquet
+"""
+
+import numpy as np
+import scipy.sparse as sparse
+import scipy.sparse.linalg as spla
+import matplotlib.pyplot as plt
+import pyvista as pv
+import pyvistaqt as pvQt
+from mesh import Mesh
+from meshGenerator import MeshGenerator
+from meshConnectivity import MeshConnectivity
+from meshPlotter import MeshPlotter
+from typing import Tuple
+
+class CouetteFlow:
+    def __init__(self, x_min, x_max, y_min, y_max):
+        self.x_min, self.x_max = x_min, x_max
+        self.y_min, self.y_max = y_min, y_max
+        self.rho = 1.0  # kg/m^3
+        self.mu = 1.0  # N*s/m^2
+        self.U = 1.0  # m/s
+        self.b = 1.0  # m
+        
+        self.mesh = None
+        self.face_areas = None
+        self.cell_volumes = None
+        self.normal_face = None
+        self.cell_centers = None
+        
+    def generate_mesh(self, mesh_type='TRI', lc=0.1):
+        mesh_generator = MeshGenerator()
+        mesh_parameters = {'mesh_type': mesh_type, 'lc': lc}
+        self.mesh = mesh_generator.rectangle([self.x_min, self.x_max, self.y_min, self.y_max], mesh_parameters)
+        mesh_connectivity = MeshConnectivity(self.mesh)
+        mesh_connectivity.compute_connectivity()
+        self.compute_mesh_properties()
+        return self.mesh
+    
+    def compute_mesh_properties(self):
+        self.face_areas = self.compute_face_areas()
+        self.cell_volumes = self.compute_cell_volumes()
+        self.normal_face = self.compute_normal_face()
+        self.cell_centers = self.compute_cell_centers()
+    
+    def compute_face_areas(self):
+        face_areas = np.zeros(self.mesh.get_number_of_faces())
+        for i_face in range(self.mesh.get_number_of_faces()):
+            nodes = self.mesh.get_face_to_nodes(i_face)
+            x1, y1 = self.mesh.get_node_to_xycoord(nodes[0])
+            x2, y2 = self.mesh.get_node_to_xycoord(nodes[1])
+            face_areas[i_face] = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        return face_areas
+    
+    def compute_cell_volumes(self):
+        cell_volumes = np.zeros(self.mesh.get_number_of_elements())
+        for i_elem in range(self.mesh.get_number_of_elements()):
+            nodes = self.mesh.get_element_to_nodes(i_elem)
+            coords = np.array([self.mesh.get_node_to_xycoord(node) for node in nodes])
+            if len(nodes) == 3:  # Triangles
+                cell_volumes[i_elem] = 0.5 * np.abs(np.cross(coords[1] - coords[0], coords[2] - coords[0]))
+            elif len(nodes) == 4:  # Quadrilaterals
+                cell_volumes[i_elem] = 0.5 * np.abs(np.cross(coords[2] - coords[0], coords[3] - coords[1]))
+        return cell_volumes
+    
+    def compute_normal_face(self):
+        normal_face = np.zeros((self.mesh.get_number_of_faces(), 2))
+        for i_face in range(self.mesh.get_number_of_faces()):
+            nodes = self.mesh.get_face_to_nodes(i_face)
+            x1, y1 = self.mesh.get_node_to_xycoord(nodes[0])
+            x2, y2 = self.mesh.get_node_to_xycoord(nodes[1])
+            nx, ny = y2 - y1, x1 - x2
+            norm = np.sqrt(nx**2 + ny**2)
+            normal_face[i_face] = [nx/norm, ny/norm]
+        return normal_face
+    
+    def compute_cell_centers(self):
+        cell_centers = np.zeros((self.mesh.get_number_of_elements(), 2))
+        for i_elem in range(self.mesh.get_number_of_elements()):
+            nodes = self.mesh.get_element_to_nodes(i_elem)
+            coords = np.array([self.mesh.get_node_to_xycoord(node) for node in nodes])
+            cell_centers[i_elem] = np.mean(coords, axis=0)
+        return cell_centers
+    
+    def analytical_solution(self, x, y, P):
+        return y * (1 - P * (1 - y)), 0
+    
+    def centre_element_2D(self,i_element):
+        """
+        Fonction pour renvoyer  xmoy et ymoy centre des faces et lieu des éléments géométriques en 2D 
+
+        Parameters
+        ----------
+        Maillage et numéro de l'élément
+
+        Returns
+        -------
+        xmoy et y moy 
+        """
+        # Récupération des données des sommets 
+        start = self.mesh.get_element_to_nodes_start(i_element)
+        fin = self.mesh.get_element_to_nodes_start(i_element+1)
+        noeuds_i_elements = self.mesh.element_to_nodes[start:fin] # Création des listes pour les noeuds autour d'un élément
+        # Calcul du centre géométrique du triangle
+        xmoy = 0 # Initilaisation des coordonnées virtuelles de l'élément 
+        ymoy = 0
+        for i in range(len(noeuds_i_elements)):
+            x,y = self.mesh.get_node_to_xycoord(noeuds_i_elements[i])
+            xmoy += x
+            ymoy += y 
+        xmoy = xmoy/len(noeuds_i_elements)
+        ymoy = ymoy/len(noeuds_i_elements)
+        return xmoy,ymoy
+    
+    def least_square(self,u,u_analytique,bc_number = 0):
+        Grad =1
+        
+        # Création de la matrice de calcul ATA 
+        ATA = np.zeros((self.mesh.get_number_of_elements(),2,2))
+        
+        # Création de la matrice B 
+        B = np.zeros((self.mesh.get_number_of_elements(),2))
+        coordonnees_elements_x = []
+        coordonnees_elements_y = []
+        normale_face= self.compute_normal_face()
+        for i_elem in range(self.mesh.get_number_of_elements()):
+            # Création du centre gémoétrique des différentes formes 
+            
+            x_e, y_e = self.centre_element_2D(i_elem)
+            
+            # Récupération dans deux listes distinctes 
+            
+            coordonnees_elements_x.append(x_e)
+            coordonnees_elements_y.append(y_e)  
+            
+        
+        for i_face in range(self.mesh.get_number_of_faces()):
+            neighbours_elements = self.mesh.get_face_to_elements(i_face)
+            left_cell, right_cell = self.mesh.get_face_to_elements(i_face)
+            # Pour les arrêtes internes
+            
+            if neighbours_elements[1] != -1 :
+                
+               # Coordonnées X triangles 
+               
+               xtg = coordonnees_elements_x[left_cell]
+               xtd = coordonnees_elements_x[right_cell]
+               
+               # Coordonnées Y triangles
+               
+               ytg = coordonnees_elements_y[left_cell]
+               ytd = coordonnees_elements_y[right_cell]
+               
+               # Récupération des dx et dy pour une arrête
+               
+               dx = xtg - xtd
+               dy = ytg - ytd
+               
+               # Pour les arêtes internes
+               
+               ALS = np.zeros((2,2))
+               
+               # Création des différents paramèetres de la matrice 2x2
+               
+               ALS[0,0]= dx*dx
+               ALS[1,0]= dx*dy
+               ALS[0,1]= dy*dx
+               ALS[1,1]= dy*dy
+               
+               ATA[left_cell]+= ALS
+               ATA[right_cell]+= ALS
+               
+               # Remplissage de B 
+               
+               U_td = u(xtd,ytd)
+               U_tg = u(xtg,ytg)
+               
+               B[left_cell,0] = B[left_cell,0] + (xtd-xtg) * (U_td - U_tg)
+               B[left_cell,1] = B[left_cell,1] + (ytd-ytg) * (U_td - U_tg)
+               B[right_cell,0] = B[right_cell,0] + (xtd-xtg) * (U_td - U_tg)
+               B[right_cell,1] = B[right_cell,1] + (ytd-ytg) * (U_td - U_tg)
+               
+            if neighbours_elements[1] == -1 : # pour les faces frontières 
+                # DIRICHLET
+                # Création du centre de l'arrête
+                noeuds_faces = self.mesh.get_face_to_nodes(i_face)
+                
+                xa =self.mesh.get_node_to_xcoord(noeuds_faces[0])
+                ya =self.mesh.get_node_to_ycoord(noeuds_faces[0])
+                xb =self.mesh.get_node_to_xcoord(noeuds_faces[1])
+                yb =self.mesh.get_node_to_xcoord(noeuds_faces[1])
+                
+                # Milieu
+                
+                x_milieu = (xa+xb)/2
+                y_milieu = (yb+ya)/2
+                y_face = y_milieu
+                x_face = x_milieu
+                
+                if np.isclose(y_face, self.y_min) or np.isclose(y_face, self.y_max):
+                     
+                    # Dx et Dy
+                    xtg = coordonnees_elements_x[neighbours_elements[0]]
+                    ytg = coordonnees_elements_y[neighbours_elements[0]]
+                    
+                    dx = (xtg - x_milieu)
+                    dy = (ytg - y_milieu)
+                    
+                    # Pour les arêtes internes 
+                    
+                    ALS = np.zeros((2,2))
+                    
+                    # Création des différents paramèetres de la matrice 2x2
+                    
+                    ALS[0,0]= dx*dx
+                    ALS[1,0]= dx*dy
+                    ALS[0,1]= dy*dx
+                    ALS[1,1]= dy*dy
+                    # Remplissage
+                    
+                    ATA[left_cell] += ALS
+                    
+                    U_tg = u(left_cell)
+                    U_A =  u(x_milieu,y_milieu,P=0)
+                    
+                    B[left_cell,0] = B[left_cell,0] + (x_milieu-xtg) * (U_A - U_tg)
+                    B[left_cell,1] = B[left_cell,1] + (y_milieu-ytg) * (U_A - U_tg)
+                
+                elif np.isclose(x_face, self.x_min) or np.isclose(x_face, self.x_max):
+                    # Dx et Dy
+                    # Neumann
+                    noeuds_faces = self.mesh.get_face_to_nodes(i_face)
+                    
+                    xtg = coordonnees_elements_x[neighbours_elements[0]]
+                    ytg = coordonnees_elements_y[neighbours_elements[0]]
+                    
+                    dx = (xtg - x_milieu)
+                    dy = (ytg - y_milieu)
+                    
+                    
+                    nx,ny = normale_face[i_face]
+                    # Pour les arêtes internes 
+                    
+                    xtg = coordonnees_elements_x[neighbours_elements[0]]
+                    ytg = coordonnees_elements_y[neighbours_elements[0]] 
+                    
+                    x_milieu = ( self.mesh.get_node_to_xcoord(noeuds_faces[1]) + self.mesh.get_node_to_xcoord(noeuds_faces[0]))/2
+                    y_milieu = ( self.mesh.get_node_to_ycoord(noeuds_faces[1]) + self.mesh.get_node_to_ycoord(noeuds_faces[0]))/2
+                    
+                    dx1 =((x_milieu-xtg))
+                    dy1 = ((y_milieu-ytg))
+                    
+                    dx = (dx1*nx+dy1*ny)*nx
+                    dy = (dx1*nx + dy1*ny)*ny
+                    
+                    
+                    ALS = np.zeros((2,2))
+                    
+                    # Création des différents paramèetres de la matrice 2x2
+                    
+                    ALS[0,0]= dx*dx
+                    ALS[1,0]= dx*dy
+                    ALS[0,1]= dy*dx
+                    ALS[1,1]= dy*dy
+                    # Remplissage
+                    
+                    
+                    # Remplissage 
+                    ATA[left_cell] += ALS
+                    
+                    dx = ((x_milieu-xtg)*nx + (y_milieu-ytg)*ny)*nx
+                    dy = ((x_milieu-xtg)*nx + (y_milieu-ytg)*ny)*ny
+                     
+                    Phi_N = bc_number
+                    
+                    delta_phi = ((x_milieu-xtg)*nx + (y_milieu-ytg)*ny)*Phi_N
+                    
+                    B[left_cell,0] = B[left_cell ,0] + dx * delta_phi
+                    B[left_cell ,1] = B[left_cell ,1] + dy * delta_phi
+        
+        # Création de la matrice ATAI    
+        number_of_elements = self.mesh.get_number_of_elements()
+        ATAI = np.zeros((number_of_elements ,2,2))
+        
+        # BOucle sur les triangles 
+        
+        for i in range(number_of_elements):
+            
+            AL = ATA[i] # Sélection de chaque élément
+            ALI = np.linalg.inv(AL) # Inversion de chaque élément
+            ATAI[i]= ALI # Ajout à la nouvelle matrice
+        
+        # Création du gradient 
+        
+        Grad =np.zeros((number_of_elements ,2))
+        
+        # Résolution numérique 
+        
+        for i in range(number_of_elements):
+            
+            Grad[i] = np.dot(ATAI[i],B[i]) # Multiplication des deux matrices
+                    
+                
+            
+        return Grad
+    
+    def gradient(self, x,y):
+        return 3
+    def gradient_analytique(self,x,y):
+        return 0
+        
+    
+    def assemble_system(self, P, u, v, scheme='centered'):
+        n_cells = self.mesh.get_number_of_elements()
+        A = sparse.lil_matrix((2*n_cells, 2*n_cells))
+        b = np.zeros(2*n_cells)
+        
+        for i_face in range(self.mesh.get_number_of_faces()):
+            left_cell, right_cell = self.mesh.get_face_to_elements(i_face)
+            
+            if right_cell != -1:  # Internal face
+                self.add_internal_face_contribution(A, u, v, left_cell, right_cell, i_face, scheme)
+            else:  # Boundary face
+                self.add_boundary_face_contribution(A, b, left_cell, i_face, P)
+        
+        # Source terms
+        b[:n_cells] += -2 * P * self.cell_volumes  # Sx
+        # Sy is zero for this problem
+        
+        return A.tocsr(), b
+    
+    def add_internal_face_contribution(self, A, u, v, left_cell, right_cell, i_face, scheme):
+        n_cells = self.mesh.get_number_of_elements()
+        u_face = 0.5 * (u[left_cell] + u[right_cell])# COM 
+        v_face = 0.5 * (v[left_cell] + v[right_cell])# COM 
+        
+        
+        velocity_dot_normal = u_face * self.normal_face[i_face, 0] + v_face * self.normal_face[i_face, 1]
+        
+        # Convective term
+        if scheme == 'centered':
+            conv_coeff = 0.5 * self.rho * velocity_dot_normal * self.face_areas[i_face]
+            A[left_cell, right_cell] -= conv_coeff
+            A[right_cell, left_cell] += conv_coeff
+            A[left_cell, left_cell] += conv_coeff
+            A[right_cell, right_cell] -= conv_coeff
+            
+            A[n_cells + left_cell, n_cells + right_cell] -= conv_coeff
+            A[n_cells + right_cell, n_cells + left_cell] += conv_coeff
+            A[n_cells + left_cell, n_cells + left_cell] += conv_coeff
+            A[n_cells + right_cell, n_cells + right_cell] -= conv_coeff
+        
+        elif scheme == 'upwind':
+            conv_coeff = self.rho * abs(velocity_dot_normal) * self.face_areas[i_face]
+            if velocity_dot_normal > 0:
+                A[right_cell, left_cell] += conv_coeff
+                A[left_cell, left_cell] -= conv_coeff
+                A[n_cells + right_cell, n_cells + left_cell] += conv_coeff
+                A[n_cells + left_cell, n_cells + left_cell] -= conv_coeff
+            else:
+                A[left_cell, right_cell] -= conv_coeff
+                A[right_cell, right_cell] += conv_coeff
+                A[n_cells + left_cell, n_cells + right_cell] -= conv_coeff
+                A[n_cells + right_cell, n_cells + right_cell] += conv_coeff
+        
+        # Diffusive term
+        dx = self.cell_centers[right_cell] - self.cell_centers[left_cell]
+        distance = np.linalg.norm(dx)
+        diff_coeff = self.mu * self.face_areas[i_face] / distance
+        
+        # Résolution pour u 
+        A[left_cell, right_cell] -= diff_coeff
+        A[right_cell, left_cell] -= diff_coeff
+        A[left_cell, left_cell] += diff_coeff
+        A[right_cell, right_cell] += diff_coeff
+        
+        # Résolution pour v 
+        A[n_cells + left_cell, n_cells + right_cell] -= diff_coeff
+        A[n_cells + right_cell, n_cells + left_cell] -= diff_coeff
+        A[n_cells + left_cell, n_cells + left_cell] += diff_coeff
+        A[n_cells + right_cell, n_cells + right_cell] += diff_coeff
+    
+    def add_boundary_face_contribution(self, A, b, left_cell, i_face, P):
+        n_cells = self.mesh.get_number_of_elements()
+        x_face, y_face = np.mean([self.mesh.get_node_to_xycoord(node) for node in self.mesh.get_face_to_nodes(i_face)], axis=0)
+        
+        if np.isclose(y_face, self.y_min) or np.isclose(y_face, self.y_max):
+            # Dirichlet boundary condition
+            u_boundary, v_boundary = self.analytical_solution(x_face, y_face, P)
+            
+            diff_coeff = self.mu * self.face_areas[i_face] / (0.5 * self.face_areas[i_face])
+            A[left_cell, left_cell] += diff_coeff
+            A[n_cells + left_cell, n_cells + left_cell] += diff_coeff
+            b[left_cell] += diff_coeff * u_boundary
+            b[n_cells + left_cell] += diff_coeff * v_boundary
+        
+        elif np.isclose(x_face, self.x_min) or np.isclose(x_face, self.x_max):
+            # Neumann boundary condition (zero gradient)
+            pass
+    
+    def solve_system(self, A, b):
+        return spla.spsolve(A, b)
+    def champ_P(self,x,y,P =0):
+        answer = -(self.b**2)/(2*self.mu*self.U)*-2*P
+        return answer
+    
+    def Rhie_Chow(self,Grad,A,b,u,v,PS = 0):
+        DAU = A.diagonal()
+        U = []
+        volumes = self.cell_volumes()
+        coordonnees_elements_x = []
+        coordonnees_elements_y = []
+        normale_face= self.compute_normal_face()
+        for i_elem in range(self.mesh.get_number_of_elements()):
+            # Création du centre gémoétrique des différentes formes 
+            
+            x_e, y_e = self.centre_element_2D(i_elem)
+            
+            # Récupération dans deux listes distinctes 
+            
+            coordonnees_elements_x.append(x_e)
+            coordonnees_elements_y.append(y_e)  
+            
+        for i_face in range(self.mesh.get_number_of_faces()):
+            neighbours_elements = self.mesh.get_face_to_elements(i_face)
+            left_cell, right_cell = self.mesh.get_face_to_elements(i_face)
+            # Pour les arrêtes internes
+            
+            if neighbours_elements[1] != -1 :
+                # Vecteurs et composantes des deux triangles
+                ug = u[left_cell]
+                ud = u[right_cell]
+                vg = v[left_cell]
+                vd = v[right_cell]
+                #Volumes
+                volume_left_cell = volumes[left_cell]
+                volume_right_cell = volumes[right_cell]
+                # Normale
+                nx = self.normal_face[i_face, 0]
+                ny = self.normal_face[i_face, 1]
+                # DAU
+                ag = DAU[left_cell]
+                ad = DAU[right_cell]
+                # Delta ksi
+                dx = self.cell_centers[right_cell] - self.cell_centers[left_cell]
+                distance = np.linalg.norm(dx)
+                
+                xtg = coordonnees_elements_x[neighbours_elements[0]]
+                ytg = coordonnees_elements_y[neighbours_elements[0]] 
+                xtd = coordonnees_elements_x[neighbours_elements[1]]
+                ytd = coordonnees_elements_y[neighbours_elements[1]] 
+                e_ksi = [ (xtg-xtd) /distance , (ytg-ytd)/distance]
+                #definition du champ P
+                P_tg = self.champ_P(coordonnees_elements_x(left_cell) ,coordonnees_elements_y(left_cell))
+                P_td = self.champ_P(coordonnees_elements_x(right_cell),coordonnees_elements_y(right_cell))
+                #
+                coeff1 = 0.5* (ug+ud)*nx + (vg+vd)*ny # Premier terme
+                coeff2 = 0.5*(volumes[left_cell]/ag+volumes[right_cell]/ad)*((P_tg-P_td)/distance)
+                coeff3 = 0.5 * (volumes[left_cell]/ag*Grad[left_cell][0]+volumes[right_cell]/ad*Grad[right_cell][0])*(e_ksi[0]) + 0.5 * (volumes[left_cell]/ag*Grad[left_cell][1]+volumes[right_cell]/ad*Grad[right_cell][1])*(e_ksi[1])
+                
+                U[i_face] = coeff1 + coeff2 + coeff3
+            
+            if neighbours_elements[1] == -1 :
+                noeuds_faces = self.mesh.get_face_to_nodes(i_face)
+                
+                xa = self.mesh.get_node_to_xcoord(noeuds_faces[0])
+                ya = self.mesh.get_node_to_ycoord(noeuds_faces[0])
+                xb = self.mesh.get_node_to_xcoord(noeuds_faces[1])
+                yb = self.mesh.get_node_to_xcoord(noeuds_faces[1])
+                
+                y_face = (ya+yb)/2
+                x_face = (xa+xb)/2
+                
+                nx = self.normal_face[i_face, 0]
+                ny = self.normal_face[i_face, 1]
+                
+                ug = u[left_cell]
+                vg = v[left_cell]
+                
+                volume_left_cell = volumes[left_cell]
+                ag = DAU[left_cell]
+                
+                x = np.array([x_face,y_face]) - self.cell_centers[left_cell]
+                distance = np.linalg.norm(dx)
+                
+                nx = self.normal_face[i_face, 0]
+                ny = self.normal_face[i_face, 1]
+                
+                xtg = coordonnees_elements_x[neighbours_elements[0]]
+                ytg = coordonnees_elements_y[neighbours_elements[0]] 
+                
+                e_ksi = [ (xtg-x_face) /distance , (ytg-y_face)/distance]
+                
+                if np.isclose(y_face, self.y_min) or np.isclose(y_face, self.y_max):
+                    U[i_face] = self.analytical_solution(x_face,y_face)*nx + self.analytical_solution(x_face,y_face)*ny
+                
+                if np.isclose(x_face, self.x_min) or np.isclose(x_face, self.x_max):
+                    
+              
+                    coeff1 =  (ug)*nx + (vg)*ny 
+                    coeff2 =  volume_left_cell/ag *(self.champ_P(x_face,y_face)-PS)/distance
+                    coeff3 = volume_left_cell/ag *(Grad[left_cell][0]*nx + Grad[left_cell][1]*ny)
+                    
+                    
+                    U[i_face] = coeff1 + coeff2 + coeff3
+                
+                
+        return U 
+    
+    def analytical_solution(self, x, y, P=0):
+        return y * (1 - P * (1 - y)), 0
+    
+    def compute_error(self, u_numerical, v_numerical, P):
+        error_u = np.zeros_like(u_numerical)
+        error_v = np.zeros_like(v_numerical)
+        for i_cell in range(len(u_numerical)):
+            x, y = self.cell_centers[i_cell]
+            u_analytical, v_analytical = self.analytical_solution(x, y, P)
+            error_u[i_cell] = abs(u_numerical[i_cell] - u_analytical)
+            error_v[i_cell] = abs(v_numerical[i_cell] - v_analytical)
+        
+        # Calculate L1, L2, and Linf errors
+        L1_error_u = np.mean(error_u)
+        L2_error_u = np.sqrt(np.mean(error_u**2))
+        Linf_error_u = np.max(error_u)
+        
+        L1_error_v = np.mean(error_v)
+        L2_error_v = np.sqrt(np.mean(error_v**2))
+        Linf_error_v = np.max(error_v)
+        
+        return {
+            'L1_u': L1_error_u, 'L2_u': L2_error_u, 'Linf_u': Linf_error_u,
+            'L1_v': L1_error_v, 'L2_v': L2_error_v, 'Linf_v': Linf_error_v}
+    
+    def relaxation(self,u_new,v_new,u_prec,v_prec,alpha = 0.7):
+        u_final = alpha*u_new + (1-alpha)*u_prec
+        v_final = alpha*v_new + (1-alpha)*v_prec
+        return u_final, v_final
+    
+    def run_analysis(self, P_values, schemes, lc_values, max_iterations=1000, tolerance=1e-6):
+        results = []
+        
+        for lc in lc_values:
+            self.generate_mesh(lc=lc)
+            n_elements = self.mesh.get_number_of_elements()
+
+            a = self.least_square(self.gradient,self.gradient)
+            print(a)
+            
+            for P in P_values:
+                for scheme in schemes:
+                    u, v = np.zeros(n_elements), np.zeros(n_elements)
+                    for iteration in range(max_iterations):
+                        A, b = self.assemble_system(P, u, v, scheme)
+                        
+                        
+                        solution = self.solve_system(A, b)
+                        u_new, v_new = solution[:n_elements], solution[n_elements:]
+                        u_final,v_final = self.relaxation(u_new,v_new,u,v)
+                        
+                
+                        if np.max(np.abs(u_new - u)) < tolerance and np.max(np.abs(v_new - v)) < tolerance:
+                            break
+                        u, v = u_final, v_final
+                    
+                    
+                    errors = self.compute_error(u, v, P)
+                    results.append({
+                        'lc': lc, 'P': P, 'scheme': scheme,
+                        'iterations': iteration + 1, 'errors': errors,
+                        'u': u, 'v': v
+                    })
+        return results
+   
+
+    def create_pyvista_grid(self, u_values, v_values):
+        plotter = MeshPlotter()
+        nodes, elements = plotter.prepare_data_for_pyvista(self.mesh)
+        points = np.array(nodes)
+        cells = elements
+        
+        cell_types = []
+        i = 0
+        while i < len(cells):
+            num_points = cells[i]
+            cell_types.append(pv.CellType.TRIANGLE if num_points == 3 else pv.CellType.QUAD)
+            i += num_points + 1
+        
+        grid = pv.UnstructuredGrid(cells, np.array(cell_types), points)
+        
+        
+        grid.cell_data['u'] = u_values
+        grid.cell_data['v'] = v_values
+        grid.cell_data['velocity_magnitude'] = np.sqrt(u_values**2 + v_values**2)
+        
+        return grid
+
+    def create_analytical_grid(self, P):
+        grid = self.create_pyvista_grid(np.zeros(self.mesh.get_number_of_elements()), np.zeros(self.mesh.get_number_of_elements()))
+        
+        u_analytical = np.zeros(self.mesh.get_number_of_elements())
+        v_analytical = np.zeros(self.mesh.get_number_of_elements())
+        
+        for i in range(self.mesh.get_number_of_elements()):
+            x, y = self.cell_centers[i]
+            u_analytical[i], v_analytical[i] = self.analytical_solution(x, y, P)
+        
+        grid.cell_data['u'] = u_analytical
+        grid.cell_data['v'] = v_analytical
+        grid.cell_data['velocity_magnitude'] = np.sqrt(u_analytical**2 + v_analytical**2)
+        
+        return grid
+
+    def plot_results(self, results):
+        for result in results:
+            lc, P, scheme = result['lc'], result['P'], result['scheme']
+            u, v = result['u'], result['v']
+
+            self.generate_mesh(lc=lc)
+            numerical_grid = self.create_pyvista_grid(u, v)
+            analytical_grid = self.create_analytical_grid(P)
+            
+            # Convert cell data to point data
+            numerical_grid = numerical_grid.cell_data_to_point_data()
+            analytical_grid = analytical_grid.cell_data_to_point_data()
+            
+            pl = pvQt.BackgroundPlotter(shape=(2, 2))
+            
+            # Plot numerical solution with contours
+            pl.subplot(0, 0)
+            pl.add_mesh(numerical_grid, scalars="velocity_magnitude", cmap="viridis", show_edges=True)
+            contours_num = numerical_grid.contour(scalars="velocity_magnitude", isosurfaces=10)
+            pl.add_mesh(contours_num, color="white", line_width=2)
+            pl.add_text("Solution Numérique", font_size=10)
+            
+            # Plot analytical solution with contours
+            pl.subplot(0, 1)
+            pl.add_mesh(analytical_grid, scalars="velocity_magnitude", cmap="viridis", show_edges=True)
+            contours_ana = analytical_grid.contour(scalars="velocity_magnitude", isosurfaces=10)
+            pl.add_mesh(contours_ana, color="white", line_width=2)
+            pl.add_text("Solution Analytique", font_size=10)
+            
+            pl.add_text(f"Champ de vitesse (P={P}, schéma={scheme}, lc={lc})", font_size=6, position='lower_edge')
+    
+            # Plot error
+            pl.subplot(1, 0)
+            error_grid = numerical_grid.copy()
+            error_grid.point_data['error'] = np.abs(numerical_grid.point_data['velocity_magnitude'] - analytical_grid.point_data['velocity_magnitude'])
+            pl.add_mesh(error_grid, scalars="error", cmap="RdBu", show_edges=True)
+            contours_error = error_grid.contour(scalars="error", isosurfaces=10)
+            pl.add_mesh(contours_error, color="black", line_width=1)
+            pl.add_text(f"Erreur (P={P}, schema={scheme}, lc={lc})", font_size=6)
+            pl.link_views()
+            
+            # Plot velocity profiles
+            pl.subplot(1, 1)
+            x_values = [0.25, 0.5, 0.75]
+            for x in x_values:
+                num_line = numerical_grid.sample_over_line((x, 0, 0), (x, 1, 0))
+                ana_line = analytical_grid.sample_over_line((x, 0, 0), (x, 1, 0))
+                
+                num_y = num_line.points[:, 1]
+                ana_y = ana_line.points[:, 1]
+                num_vel = num_line['velocity_magnitude']
+                ana_vel = ana_line['velocity_magnitude']
+                
+                plt.plot(num_y, num_vel, label=f'Numérique x={x}')
+                plt.plot(ana_y, ana_vel, '--', label=f'Analytique x={x}')
+            
+            plt.xlabel('y')
+            plt.ylabel('Vitesse (Magnitude)')
+            plt.title(f'Coupes à X constant (P={P}, scheme={scheme})')
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(f'velocity_profile_P{P}_{scheme}_lc{lc}.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            # Add the saved figure to the plot
+            plane = pv.Plane(center=(0.5, 0.5, 0.01), i_size=1, j_size=1, direction=(0, 0, 1))
+            texture = pv.read_texture(f'velocity_profile_P{P}_{scheme}_lc{lc}.png')
+            plane.texture_map_to_plane(inplace=True)
+            pl.add_mesh(plane, texture=texture)
+            
+            pl.camera_position = [(0.5, 0.5, 2), (0.5, 0.5, 0), (0, 1, 0)]
+            pl.camera.zoom(0.75)
+    
+            pl.show()
+        
+
+
+
+def run_analysis_and_plot(flow_solver, P_values, schemes, mesh_sizes):
+    results = flow_solver.run_analysis(P_values, schemes, mesh_sizes)
+    flow_solver.plot_results(results)
+    
+    error_types = ['L1_u', 'L2_u', 'Linf_u']
+    
+    plt.figure(figsize=(10, 6))
+    for P in P_values:
+        for scheme in schemes:
+            for error_type in error_types:
+                errors = [result['errors'][error_type] for result in results if result['P'] == P and result['scheme'] == scheme]
+                h = [result['lc'] for result in results if result['P'] == P and result['scheme'] == scheme]
+                plt.loglog(h, errors, 'o-', label=f'{error_type}, P={P}, {scheme}')
+                if len(errors) > 1:
+                    order = np.log(errors[-2] / errors[-1]) / np.log(h[-2] / h[-1])
+                    print(f"Ordre de Convergence {error_type} pour P={P}, schéma={scheme}: {order:.2f}")
+    
+    plt.xlabel('Taille des éléments (h)')
+    plt.ylabel('Erreur')
+    plt.title('Comparaison des erreurs L1, L2, et Linf')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+def main():
+    P_values = [0, 1, -3]
+    schemes = ['centered']
+    lc_values = [2, 1, 0.5]
+    theta=45
+    
+    classic_couette_flow = CouetteFlow(0, 1, 0, 1)
+    run_analysis_and_plot(classic_couette_flow, P_values, schemes, lc_values)
+    
+
+
+if __name__ == "__main__":
+    main()
